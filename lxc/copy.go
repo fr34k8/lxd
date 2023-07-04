@@ -8,7 +8,6 @@ import (
 
 	"github.com/lxc/lxd/client"
 	"github.com/lxc/lxd/lxc/config"
-	"github.com/lxc/lxd/lxc/utils"
 	"github.com/lxc/lxd/shared"
 	"github.com/lxc/lxd/shared/api"
 	cli "github.com/lxc/lxd/shared/cmd"
@@ -295,10 +294,6 @@ func (c *cmdCopy) copyInstance(conf *config.Config, sourceResource string, destR
 		}
 
 		rootDiskDeviceKey, _, _ := shared.GetRootDiskDevice(entry.Devices)
-		if err != nil {
-			return err
-		}
-
 		if rootDiskDeviceKey != "" && pool != "" {
 			entry.Devices[rootDiskDeviceKey]["pool"] = pool
 		} else if pool != "" {
@@ -337,7 +332,7 @@ func (c *cmdCopy) copyInstance(conf *config.Config, sourceResource string, destR
 	}
 
 	// Watch the background operation
-	progress := utils.ProgressRenderer{
+	progress := cli.ProgressRenderer{
 		Format: i18n.G("Transferring instance: %s"),
 		Quiet:  c.global.flagQuiet,
 	}
@@ -349,7 +344,7 @@ func (c *cmdCopy) copyInstance(conf *config.Config, sourceResource string, destR
 	}
 
 	// Wait for the copy to complete
-	err = utils.CancelableWait(op, &progress)
+	err = cli.CancelableWait(op, &progress)
 	if err != nil {
 		progress.Done("")
 		return err
@@ -364,7 +359,16 @@ func (c *cmdCopy) copyInstance(conf *config.Config, sourceResource string, destR
 		}
 
 		// Ensure we don't change the target's volatile.idmap.next value.
-		writable.Config["volatile.idmap.next"] = inst.Config["volatile.idmap.next"]
+		if inst.Config["volatile.idmap.next"] != writable.Config["volatile.idmap.next"] {
+			writable.Config["volatile.idmap.next"] = inst.Config["volatile.idmap.next"]
+		}
+
+		// Ensure we don't change the target's root disk pool.
+		srcRootDiskDeviceKey, _, _ := shared.GetRootDiskDevice(writable.Devices)
+		destRootDiskDeviceKey, destRootDiskDevice, _ := shared.GetRootDiskDevice(inst.Devices)
+		if srcRootDiskDeviceKey != "" && srcRootDiskDeviceKey == destRootDiskDeviceKey {
+			writable.Devices[destRootDiskDeviceKey]["pool"] = destRootDiskDevice["pool"]
+		}
 
 		op, err := dest.UpdateInstance(destName, writable, etag)
 		if err != nil {
@@ -372,7 +376,7 @@ func (c *cmdCopy) copyInstance(conf *config.Config, sourceResource string, destR
 		}
 
 		// Watch the background operation
-		progress := utils.ProgressRenderer{
+		progress := cli.ProgressRenderer{
 			Format: i18n.G("Refreshing instance: %s"),
 			Quiet:  c.global.flagQuiet,
 		}
@@ -384,7 +388,7 @@ func (c *cmdCopy) copyInstance(conf *config.Config, sourceResource string, destR
 		}
 
 		// Wait for the copy to complete
-		err = utils.CancelableWait(op, &progress)
+		err = cli.CancelableWait(op, &progress)
 		if err != nil {
 			progress.Done("")
 			return err

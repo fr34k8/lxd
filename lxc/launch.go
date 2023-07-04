@@ -5,7 +5,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/lxc/lxd/lxc/utils"
 	"github.com/lxc/lxd/shared/api"
 	cli "github.com/lxc/lxd/shared/cmd"
 	"github.com/lxc/lxd/shared/i18n"
@@ -30,8 +29,8 @@ func (c *cmdLaunch) Command() *cobra.Command {
 lxc launch ubuntu:22.04 u1 < config.yaml
     Create and start a container with configuration from config.yaml
 
-lxc launch ubuntu:22.04 u2 -t aws:t1.micro
-    Create and start a container using the same size as an AWS t1.micro (1 vCPU, 627MB of RAM)
+lxc launch ubuntu:22.04 u2 -t aws:t2.micro
+    Create and start a container using the same size as an AWS t2.micro (1 vCPU, 1GiB of RAM)
 
 lxc launch ubuntu:22.04 v1 --vm -c limits.cpu=4 -c limits.memory=4GiB
     Create and start a virtual machine with 4 vCPUs and 4GiB of RAM`))
@@ -89,7 +88,7 @@ func (c *cmdLaunch) Run(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	progress := utils.ProgressRenderer{
+	progress := cli.ProgressRenderer{
 		Quiet: c.global.flagQuiet,
 	}
 
@@ -100,7 +99,7 @@ func (c *cmdLaunch) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	// Wait for operation to finish
-	err = utils.CancelableWait(op, &progress)
+	err = cli.CancelableWait(op, &progress)
 	if err != nil {
 		progress.Done("")
 		prettyName := name

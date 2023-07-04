@@ -658,7 +658,14 @@ test_clustering_storage() {
     LXD_DIR="${LXD_ONE_DIR}" lxd sql global "SELECT nodes.name,storage_pools_nodes.state FROM nodes JOIN storage_pools_nodes ON storage_pools_nodes.node_id = nodes.id JOIN storage_pools ON storage_pools.id = storage_pools_nodes.storage_pool_id WHERE storage_pools.name = 'pool1' AND nodes.name = 'node1'" | grep "| node1 | 1     |"
     LXD_DIR="${LXD_ONE_DIR}" lxd sql global "SELECT nodes.name,storage_pools_nodes.state FROM nodes JOIN storage_pools_nodes ON storage_pools_nodes.node_id = nodes.id JOIN storage_pools ON storage_pools.id = storage_pools_nodes.storage_pool_id WHERE storage_pools.name = 'pool1' AND nodes.name = 'node2'" | grep "| node2 | 1     |"
 
+    # Check copying storage volumes works.
+    LXD_DIR="${LXD_ONE_DIR}" lxc storage volume create pool1 vol1 --target=node1
+    LXD_DIR="${LXD_ONE_DIR}" lxc storage volume copy pool1/vol1 pool1/vol1 --target=node1 --destination-target=node2
+    LXD_DIR="${LXD_ONE_DIR}" lxc storage volume copy pool1/vol1 pool1/vol1 --target=node1 --destination-target=node2 --refresh
+
     # Delete pool and check cleaned up.
+    LXD_DIR="${LXD_ONE_DIR}" lxc storage volume delete pool1 vol1 --target=node1
+    LXD_DIR="${LXD_ONE_DIR}" lxc storage volume delete pool1 vol1 --target=node2
     LXD_DIR="${LXD_TWO_DIR}" lxc storage delete pool1
     ! stat "${LXD_ONE_SOURCE}/containers" || false
     ! stat "${LXD_TWO_SOURCE}/containers" || false
@@ -667,10 +674,10 @@ test_clustering_storage() {
   # Define storage pools on the two nodes
   driver_config=""
   if [ "${poolDriver}" = "btrfs" ]; then
-      driver_config="size=20GB"
+      driver_config="size=1GiB"
   fi
   if [ "${poolDriver}" = "zfs" ]; then
-      driver_config="size=20GB"
+      driver_config="size=1GiB"
   fi
   if [ "${poolDriver}" = "ceph" ]; then
       driver_config="source=lxdtest-$(basename "${TEST_DIR}")-pool1"
@@ -718,9 +725,9 @@ test_clustering_storage() {
 
   # Create the storage pool
   if [ "${poolDriver}" = "lvm" ]; then
-      LXD_DIR="${LXD_TWO_DIR}" lxc storage create pool1 "${poolDriver}" volume.size=25MB
+      LXD_DIR="${LXD_TWO_DIR}" lxc storage create pool1 "${poolDriver}" volume.size=25MiB
   elif [ "${poolDriver}" = "ceph" ]; then
-      LXD_DIR="${LXD_TWO_DIR}" lxc storage create pool1 "${poolDriver}" volume.size=25MB ceph.osd.pg_num=16
+      LXD_DIR="${LXD_TWO_DIR}" lxc storage create pool1 "${poolDriver}" volume.size=25MiB ceph.osd.pg_num=16
   else
       LXD_DIR="${LXD_TWO_DIR}" lxc storage create pool1 "${poolDriver}"
   fi
@@ -949,10 +956,10 @@ test_clustering_storage_single_node() {
   # Create a pending storage pool on the node.
   driver_config=""
   if [ "${poolDriver}" = "btrfs" ]; then
-      driver_config="size=20GB"
+      driver_config="size=1GiB"
   fi
   if [ "${poolDriver}" = "zfs" ]; then
-      driver_config="size=20GB"
+      driver_config="size=1GiB"
   fi
   if [ "${poolDriver}" = "ceph" ]; then
       driver_config="source=lxdtest-$(basename "${TEST_DIR}")-pool1"
@@ -2756,7 +2763,7 @@ test_clustering_image_refresh() {
   # Modify public testimage
   old_fingerprint="$(LXD_DIR="${LXD_REMOTE_DIR}" lxc image ls testimage -c f --format csv)"
   dd if=/dev/urandom count=32 | LXD_DIR="${LXD_REMOTE_DIR}" lxc file push - c1/foo
-  LXD_DIR="${LXD_REMOTE_DIR}" lxc publish c1 --alias testimage --public
+  LXD_DIR="${LXD_REMOTE_DIR}" lxc publish c1 --alias testimage --reuse --public
   new_fingerprint="$(LXD_DIR="${LXD_REMOTE_DIR}" lxc image ls testimage -c f --format csv)"
 
   pids=""
@@ -2828,7 +2835,7 @@ test_clustering_image_refresh() {
 
   # Modify public testimage
   dd if=/dev/urandom count=32 | LXD_DIR="${LXD_REMOTE_DIR}" lxc file push - c1/foo
-  LXD_DIR="${LXD_REMOTE_DIR}" lxc publish c1 --alias testimage --public
+  LXD_DIR="${LXD_REMOTE_DIR}" lxc publish c1 --alias testimage --reuse --public
   new_fingerprint="$(LXD_DIR="${LXD_REMOTE_DIR}" lxc image ls testimage -c f --format csv)"
 
   pids=""
@@ -3556,19 +3563,21 @@ test_clustering_events() {
   LXD_DIR="${LXD_ONE_DIR}" lxc info c1 | grep -q "Location: node1"
   LXD_DIR="${LXD_ONE_DIR}" lxc launch testimage c2 --target=node2
 
-  LXD_DIR="${LXD_ONE_DIR}" lxc monitor --type=lifecycle > "${TEST_DIR}/node1.log" &
+  LXD_DIR="${LXD_ONE_DIR}" stdbuf -oL lxc monitor --type=lifecycle > "${TEST_DIR}/node1.log" &
   monitorNode1PID=$!
-  LXD_DIR="${LXD_TWO_DIR}" lxc monitor --type=lifecycle > "${TEST_DIR}/node2.log" &
+  LXD_DIR="${LXD_TWO_DIR}" stdbuf -oL lxc monitor --type=lifecycle > "${TEST_DIR}/node2.log" &
   monitorNode2PID=$!
-  LXD_DIR="${LXD_THREE_DIR}" lxc monitor --type=lifecycle > "${TEST_DIR}/node3.log" &
+  LXD_DIR="${LXD_THREE_DIR}" stdbuf -oL lxc monitor --type=lifecycle > "${TEST_DIR}/node3.log" &
   monitorNode3PID=$!
 
   # Restart instance generating restart lifecycle event.
   LXD_DIR="${LXD_ONE_DIR}" lxc restart -f c1
   LXD_DIR="${LXD_THREE_DIR}" lxc restart -f c2
+  sleep 2
 
   # Check events were distributed.
   for i in 1 2 3; do
+    cat "${TEST_DIR}/node${i}.log"
     grep -Fc "instance-restarted" "${TEST_DIR}/node${i}.log" | grep -Fx 2
   done
 
@@ -3593,9 +3602,11 @@ test_clustering_events() {
   # Restart instance generating restart lifecycle event.
   LXD_DIR="${LXD_ONE_DIR}" lxc restart -f c1
   LXD_DIR="${LXD_THREE_DIR}" lxc restart -f c2
+  sleep 2
 
   # Check events were distributed.
   for i in 1 2 3; do
+    cat "${TEST_DIR}/node${i}.log"
     grep -Fc "instance-restarted" "${TEST_DIR}/node${i}.log" | grep -Fx 4
   done
 
@@ -3625,9 +3636,11 @@ test_clustering_events() {
   # Restart instance generating restart lifecycle event.
   LXD_DIR="${LXD_ONE_DIR}" lxc restart -f c1
   LXD_DIR="${LXD_THREE_DIR}" lxc restart -f c2
+  sleep 2
 
   # Check events were distributed.
   for i in 1 2 3; do
+    cat "${TEST_DIR}/node${i}.log"
     grep -Fc "instance-restarted" "${TEST_DIR}/node${i}.log" | grep -Fx 6
   done
 
@@ -3656,10 +3669,11 @@ test_clustering_events() {
   # Confirm that local operations are not blocked by having no event hubs running, but that events are not being
   # distributed.
   LXD_DIR="${LXD_ONE_DIR}" lxc restart -f c1
-  sleep 1
-  grep -Fc "instance-restarted" "${TEST_DIR}/node1.log"
+  sleep 2
+
   grep -Fc "instance-restarted" "${TEST_DIR}/node1.log" | grep -Fx 7
   for i in 2 3; do
+    cat "${TEST_DIR}/node${i}.log"
     grep -Fc "instance-restarted" "${TEST_DIR}/node${i}.log" | grep -Fx 6
   done
 

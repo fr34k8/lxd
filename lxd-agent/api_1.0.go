@@ -8,10 +8,12 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/mdlayher/vsock"
+
 	"github.com/lxc/lxd/client"
 	agentAPI "github.com/lxc/lxd/lxd-agent/api"
 	"github.com/lxc/lxd/lxd/response"
-	"github.com/lxc/lxd/lxd/vsock"
+	lxdvsock "github.com/lxc/lxd/lxd/vsock"
 	"github.com/lxc/lxd/shared"
 	"github.com/lxc/lxd/shared/api"
 	"github.com/lxc/lxd/shared/logger"
@@ -96,7 +98,7 @@ func api10Put(d *Daemon, r *http.Request) response.Response {
 	}
 
 	// Try connecting to LXD server.
-	client, err := getClient(int(d.serverCID), int(d.serverPort), d.serverCertificate)
+	client, err := getClient(d.serverCID, int(d.serverPort), d.serverCertificate)
 	if err != nil {
 		return response.ErrorResponse(http.StatusInternalServerError, err.Error())
 	}
@@ -169,7 +171,7 @@ func stopDevlxdServer(d *Daemon) error {
 	return servers["devlxd"].Close()
 }
 
-func getClient(CID int, port int, serverCertificate string) (*http.Client, error) {
+func getClient(CID uint32, port int, serverCertificate string) (*http.Client, error) {
 	agentCert, err := os.ReadFile("agent.crt")
 	if err != nil {
 		return nil, err
@@ -180,7 +182,7 @@ func getClient(CID int, port int, serverCertificate string) (*http.Client, error
 		return nil, err
 	}
 
-	client, err := vsock.HTTPClient(CID, port, string(agentCert), string(agentKey), serverCertificate)
+	client, err := lxdvsock.HTTPClient(CID, port, string(agentCert), string(agentKey), serverCertificate)
 	if err != nil {
 		return nil, err
 	}
@@ -189,8 +191,8 @@ func getClient(CID int, port int, serverCertificate string) (*http.Client, error
 }
 
 func startHTTPServer(d *Daemon, debug bool) error {
-	// Setup the listener.
-	l, err := vsock.Listen(shared.HTTPSDefaultPort)
+	// Setup the listener on VM's context ID for inbound connections from LXD.
+	l, err := vsock.Listen(shared.HTTPSDefaultPort, nil)
 	if err != nil {
 		return fmt.Errorf("Failed to listen on vsock: %w", err)
 	}

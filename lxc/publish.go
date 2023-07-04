@@ -8,7 +8,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/lxc/lxd/client"
-	"github.com/lxc/lxd/lxc/utils"
 	"github.com/lxc/lxd/shared"
 	"github.com/lxc/lxd/shared/api"
 	cli "github.com/lxc/lxd/shared/cmd"
@@ -23,6 +22,7 @@ type cmdPublish struct {
 	flagExpiresAt            string
 	flagMakePublic           bool
 	flagForce                bool
+	flagReuse                bool
 }
 
 func (c *cmdPublish) Command() *cobra.Command {
@@ -38,6 +38,7 @@ func (c *cmdPublish) Command() *cobra.Command {
 	cmd.Flags().BoolVarP(&c.flagForce, "force", "f", false, i18n.G("Stop the instance if currently running"))
 	cmd.Flags().StringVar(&c.flagCompressionAlgorithm, "compression", "", i18n.G("Compression algorithm to use (`none` for uncompressed)"))
 	cmd.Flags().StringVar(&c.flagExpiresAt, "expire", "", i18n.G("Image expiration date (format: rfc3339)")+"``")
+	cmd.Flags().BoolVar(&c.flagReuse, "reuse", false, i18n.G("If the image alias already exists, delete and create a new one"))
 
 	return cmd
 }
@@ -227,13 +228,27 @@ func (c *cmdPublish) Run(cmd *cobra.Command, args []string) error {
 		req.ExpiresAt = expiresAt
 	}
 
+	existingAliases, err := GetCommonAliases(d, aliases...)
+	if err != nil {
+		return fmt.Errorf(i18n.G("Error retrieving aliases: %w"), err)
+	}
+
+	if !c.flagReuse && len(existingAliases) > 0 {
+		names := []string{}
+		for _, alias := range existingAliases {
+			names = append(names, alias.Name)
+		}
+
+		return fmt.Errorf(i18n.G("Aliases already exists: %s"), strings.Join(names, ", "))
+	}
+
 	op, err := s.CreateImage(req, nil)
 	if err != nil {
 		return err
 	}
 
 	// Watch the background operation
-	progress := utils.ProgressRenderer{
+	progress := cli.ProgressRenderer{
 		Format: i18n.G("Publishing instance: %s"),
 		Quiet:  c.global.flagQuiet,
 	}
@@ -245,7 +260,7 @@ func (c *cmdPublish) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	// Wait for the copy to complete
-	err = utils.CancelableWait(op, &progress)
+	err = cli.CancelableWait(op, &progress)
 	if err != nil {
 		progress.Done("")
 		return err
@@ -282,6 +297,44 @@ func (c *cmdPublish) Run(cmd *cobra.Command, args []string) error {
 		err = op.Wait()
 		if err != nil {
 			return err
+		}
+	}
+
+	// Delete images if necessary
+	if c.flagReuse && len(existingAliases) > 0 {
+		visitedImages := make(map[string]interface{})
+		for _, alias := range existingAliases {
+			image, _, _ := d.GetImage(alias.Target)
+
+			// If the image has already been visited then continue
+			if image != nil {
+				_, found := visitedImages[image.Fingerprint]
+				if found {
+					continue
+				}
+
+				visitedImages[image.Fingerprint] = nil
+			}
+
+			// An image can have multiple aliases. If an image being published
+			// reuses all the aliases from an existing image then that existing image is removed.
+			// In other case only specific aliases should be removed. E.g.
+			// 1. If image with 'foo' and 'bar' aliases already exists and new image is published
+			//    with aliases 'foo' and 'bar' (and flag '--reuse'). Old image should be removed.
+			// 2. If image with 'foo' and 'bar' aliases already exists and new image is published
+			//    with alias 'foo' (and flag '--reuse'). Old image should be kept with alias 'bar'
+			//    and new image will have 'foo' alias.
+			if image != nil && IsAliasesSubset(image.Aliases, aliases) {
+				op, err := d.DeleteImage(alias.Target)
+				if err != nil {
+					return err
+				}
+
+				err = op.Wait()
+				if err != nil {
+					return err
+				}
+			}
 		}
 	}
 

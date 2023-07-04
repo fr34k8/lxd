@@ -10,11 +10,13 @@ import (
 )
 
 // Mirror takes a websocket and replicates all read/write to a ReadWriteCloser.
+// Returns channels indicating when reads and writes are finished (respectively).
 func Mirror(ctx context.Context, conn *websocket.Conn, rwc io.ReadWriteCloser) (chan struct{}, chan struct{}) {
 	return MirrorWithHooks(ctx, conn, rwc, nil, nil)
 }
 
 // MirrorWithHooks is identical to Mirror but allows for code to be run at the end of the read or write operations.
+// Returns channels indicating when reads and writes are finished (respectively).
 func MirrorWithHooks(ctx context.Context, conn *websocket.Conn, rwc io.ReadWriteCloser, hookRead func(conn *websocket.Conn), hookWrite func(conn *websocket.Conn)) (chan struct{}, chan struct{}) {
 	logger.Debug("Websocket: Started mirror", logger.Ctx{"address": conn.RemoteAddr().String()})
 
@@ -75,9 +77,14 @@ func MirrorWithHooks(ctx context.Context, conn *websocket.Conn, rwc io.ReadWrite
 
 // MirrorRead is a uni-directional mirror which replicates an io.ReadCloser to a websocket.
 func MirrorRead(ctx context.Context, conn *websocket.Conn, rc io.ReadCloser) chan struct{} {
+	chDone := make(chan struct{}, 1)
+	if rc == nil {
+		close(chDone)
+		return chDone
+	}
+
 	logger.Debug("Websocket: Started read mirror", logger.Ctx{"address": conn.RemoteAddr().String()})
 
-	chDone := make(chan struct{}, 1)
 	connRWC := NewWrapper(conn)
 
 	go func() {
@@ -105,9 +112,14 @@ func MirrorRead(ctx context.Context, conn *websocket.Conn, rc io.ReadCloser) cha
 
 // MirrorWrite is a uni-directional mirror which replicates a websocket to an io.WriteCloser.
 func MirrorWrite(ctx context.Context, conn *websocket.Conn, wc io.WriteCloser) chan struct{} {
+	chDone := make(chan struct{}, 1)
+	if wc == nil {
+		close(chDone)
+		return chDone
+	}
+
 	logger.Debug("Websocket: Started write mirror", logger.Ctx{"address": conn.RemoteAddr().String()})
 
-	chDone := make(chan struct{}, 1)
 	connRWC := NewWrapper(conn)
 
 	go func() {

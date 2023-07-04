@@ -221,7 +221,7 @@ func (r *syncResponse) Render(w http.ResponseWriter) error {
 
 	var debugLogger logger.Logger
 	if debug {
-		debugLogger = logger.AddContext(logger.Log, logger.Ctx{"http_code": code})
+		debugLogger = logger.AddContext(logger.Ctx{"http_code": code})
 	}
 
 	return util.WriteJSON(w, resp, debugLogger)
@@ -340,7 +340,7 @@ func (r *errorResponse) Render(w http.ResponseWriter) error {
 	}
 
 	if debug {
-		debugLogger := logger.AddContext(logger.Log, logger.Ctx{"http_code": r.code})
+		debugLogger := logger.AddContext(logger.Ctx{"http_code": r.code})
 		util.DebugJSON("Error Response", captured, debugLogger)
 	}
 
@@ -401,6 +401,10 @@ func (r *fileResponse) Render(w http.ResponseWriter) error {
 		var mt time.Time
 		var sz int64
 
+		if r.files[0].Cleanup != nil {
+			defer r.files[0].Cleanup()
+		}
+
 		if r.files[0].File != nil {
 			rs = r.files[0].File
 			mt = r.files[0].FileModified
@@ -428,10 +432,6 @@ func (r *fileResponse) Render(w http.ResponseWriter) error {
 		w.Header().Set("Content-Disposition", fmt.Sprintf("inline;filename=%s", r.files[0].Filename))
 
 		http.ServeContent(w, r.req, r.files[0].Filename, mt, rs)
-
-		if r.files[0].Cleanup != nil {
-			r.files[0].Cleanup()
-		}
 
 		return nil
 	}
@@ -548,4 +548,14 @@ func (r *manualResponse) Render(w http.ResponseWriter) error {
 
 func (r *manualResponse) String() string {
 	return "unknown"
+}
+
+// Unauthorized return an unauthorized response (401) with the given error.
+func Unauthorized(err error) Response {
+	message := "unauthorized"
+	if err != nil {
+		message = err.Error()
+	}
+
+	return &errorResponse{http.StatusUnauthorized, message}
 }

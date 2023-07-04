@@ -121,9 +121,11 @@ func (c *cmdActivateifneeded) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	for _, inst := range instances {
-		config := inst.ExpandedConfig()
-		lastState := config["volatile.last_state.power"]
-		autoStart := config["boot.autostart"]
+		if instanceShouldAutoStart(inst) {
+			logger.Debugf("Daemon has auto-started instances, activating...")
+			_, err := lxd.ConnectLXDUnix("", nil)
+			return err
+		}
 
 		if inst.IsRunning() {
 			logger.Debugf("Daemon has running instances, activating...")
@@ -131,13 +133,8 @@ func (c *cmdActivateifneeded) Run(cmd *cobra.Command, args []string) error {
 			return err
 		}
 
-		if lastState == "RUNNING" || lastState == "Running" || shared.IsTrue(autoStart) {
-			logger.Debugf("Daemon has auto-started instances, activating...")
-			_, err := lxd.ConnectLXDUnix("", nil)
-			return err
-		}
-
 		// Check for scheduled instance snapshots
+		config := inst.ExpandedConfig()
 		if config["snapshots.schedule"] != "" {
 			logger.Debugf("Daemon has scheduled instance snapshots, activating...")
 			_, err := lxd.ConnectLXDUnix("", nil)
@@ -148,7 +145,7 @@ func (c *cmdActivateifneeded) Run(cmd *cobra.Command, args []string) error {
 	// Check for scheduled volume snapshots
 	var volumes []db.StorageVolumeArgs
 	err = d.State().DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-		volumes, err = tx.GetStoragePoolVolumesWithType(ctx, db.StoragePoolVolumeTypeCustom)
+		volumes, err = tx.GetStoragePoolVolumesWithType(ctx, db.StoragePoolVolumeTypeCustom, false)
 		if err != nil {
 			return err
 		}

@@ -108,7 +108,7 @@ var clusterGroupsCmd = APIEndpoint{
 	Path: "cluster/groups",
 
 	Get:  APIEndpointAction{Handler: clusterGroupsGet, AccessHandler: allowAuthenticated},
-	Post: APIEndpointAction{Handler: clusterGroupsPost, AccessHandler: allowAuthenticated},
+	Post: APIEndpointAction{Handler: clusterGroupsPost},
 }
 
 var clusterGroupCmd = APIEndpoint{
@@ -201,7 +201,7 @@ func clusterGet(d *Daemon, r *http.Request) response.Response {
 		serverName = ""
 	}
 
-	memberConfig, err := clusterGetMemberConfig(d.db.Cluster)
+	memberConfig, err := clusterGetMemberConfig(s.DB.Cluster)
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -385,14 +385,14 @@ func clusterPutBootstrap(d *Daemon, r *http.Request, req api.ClusterPut) respons
 		return nil
 	}
 
-	resources := map[string][]string{}
-	resources["cluster"] = []string{}
+	resources := map[string][]api.URL{}
+	resources["cluster"] = []api.URL{}
 
 	// If there's no cluster.https_address set, but core.https_address is,
 	// let's default to it.
 	var err error
 	var config *node.Config
-	err = d.db.Node.Transaction(context.TODO(), func(ctx context.Context, tx *db.NodeTx) error {
+	err = s.DB.Node.Transaction(context.TODO(), func(ctx context.Context, tx *db.NodeTx) error {
 		config, err = node.ConfigLoad(ctx, tx)
 		if err != nil {
 			return fmt.Errorf("Failed to fetch member configuration: %w", err)
@@ -448,7 +448,7 @@ func clusterPutJoin(d *Daemon, r *http.Request, req api.ClusterPut) response.Res
 		return response.BadRequest(fmt.Errorf("No target cluster member certificate provided"))
 	}
 
-	clustered, err := cluster.Enabled(d.db.Node)
+	clustered, err := cluster.Enabled(s.DB.Node)
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -474,12 +474,12 @@ func clusterPutJoin(d *Daemon, r *http.Request, req api.ClusterPut) response.Res
 
 		// First try to listen to the provided address. If we fail, we
 		// won't actually update the database config.
-		err = d.endpoints.NetworkUpdateAddress(req.ServerAddress)
+		err = s.Endpoints.NetworkUpdateAddress(req.ServerAddress)
 		if err != nil {
 			return response.SmartError(err)
 		}
 
-		err := d.db.Node.Transaction(context.TODO(), func(ctx context.Context, tx *db.NodeTx) error {
+		err := s.DB.Node.Transaction(context.TODO(), func(ctx context.Context, tx *db.NodeTx) error {
 			config, err = node.ConfigLoad(ctx, tx)
 			if err != nil {
 				return fmt.Errorf("Failed to load cluster config: %w", err)
@@ -501,7 +501,7 @@ func clusterPutJoin(d *Daemon, r *http.Request, req api.ClusterPut) response.Res
 		// is now providing a cluster address as well. If they
 		// differ we need to listen to it.
 		if !util.IsAddressCovered(req.ServerAddress, localHTTPSAddress) {
-			err := d.endpoints.ClusterUpdateAddress(req.ServerAddress)
+			err := s.Endpoints.ClusterUpdateAddress(req.ServerAddress)
 			if err != nil {
 				return response.SmartError(err)
 			}
@@ -510,7 +510,7 @@ func clusterPutJoin(d *Daemon, r *http.Request, req api.ClusterPut) response.Res
 		}
 
 		// Update the cluster.https_address config key.
-		err := d.db.Node.Transaction(context.TODO(), func(ctx context.Context, tx *db.NodeTx) error {
+		err := s.DB.Node.Transaction(context.TODO(), func(ctx context.Context, tx *db.NodeTx) error {
 			config, err = node.ConfigLoad(ctx, tx)
 			if err != nil {
 				return fmt.Errorf("Failed to load cluster config: %w", err)
@@ -532,7 +532,7 @@ func clusterPutJoin(d *Daemon, r *http.Request, req api.ClusterPut) response.Res
 	d.globalConfigMu.Unlock()
 
 	// Client parameters to connect to the target cluster node.
-	serverCert := d.serverCert()
+	serverCert := s.ServerCert()
 	args := &lxd.ConnectionArgs{
 		TLSClientCert: string(serverCert.PublicKey()),
 		TLSClientKey:  string(serverCert.PrivateKey()),
@@ -596,13 +596,13 @@ func clusterPutJoin(d *Daemon, r *http.Request, req api.ClusterPut) response.Res
 
 		// Get all defined storage pools and networks, so they can be compared to the ones in the cluster.
 		pools := []api.StoragePool{}
-		poolNames, err := d.db.Cluster.GetStoragePoolNames()
+		poolNames, err := s.DB.Cluster.GetStoragePoolNames()
 		if err != nil && !response.IsNotFoundError(err) {
 			return err
 		}
 
 		for _, name := range poolNames {
-			_, pool, _, err := d.db.Cluster.GetStoragePoolInAnyState(name)
+			_, pool, _, err := s.DB.Cluster.GetStoragePoolInAnyState(name)
 			if err != nil {
 				return err
 			}
@@ -613,7 +613,7 @@ func clusterPutJoin(d *Daemon, r *http.Request, req api.ClusterPut) response.Res
 		// Get a list of projects for networks.
 		var projects []dbCluster.Project
 
-		err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 			projects, err = dbCluster.GetProjects(ctx, tx.Tx())
 			return err
 		})
@@ -623,13 +623,13 @@ func clusterPutJoin(d *Daemon, r *http.Request, req api.ClusterPut) response.Res
 
 		networks := []api.InitNetworksProjectPost{}
 		for _, p := range projects {
-			networkNames, err := d.db.Cluster.GetNetworks(p.Name)
+			networkNames, err := s.DB.Cluster.GetNetworks(p.Name)
 			if err != nil && !response.IsNotFoundError(err) {
 				return err
 			}
 
 			for _, name := range networkNames {
-				_, network, _, err := d.db.Cluster.GetNetworkInAnyState(p.Name, name)
+				_, network, _, err := s.DB.Cluster.GetNetworkInAnyState(p.Name, name)
 				if err != nil {
 					return err
 				}
@@ -654,17 +654,17 @@ func clusterPutJoin(d *Daemon, r *http.Request, req api.ClusterPut) response.Res
 		}
 
 		// Update our TLS configuration using the returned cluster certificate.
-		err = util.WriteCert(d.os.VarDir, "cluster", []byte(req.ClusterCertificate), info.PrivateKey, nil)
+		err = util.WriteCert(s.OS.VarDir, "cluster", []byte(req.ClusterCertificate), info.PrivateKey, nil)
 		if err != nil {
 			return fmt.Errorf("Failed to save cluster certificate: %w", err)
 		}
 
-		networkCert, err := util.LoadClusterCert(d.os.VarDir)
+		networkCert, err := util.LoadClusterCert(s.OS.VarDir)
 		if err != nil {
 			return fmt.Errorf("Failed to parse cluster certificate: %w", err)
 		}
 
-		d.endpoints.NetworkUpdateCert(networkCert)
+		s.Endpoints.NetworkUpdateCert(networkCert)
 
 		// Add trusted certificates of other members to local trust store.
 		trustedCerts, err := client.GetCertificates()
@@ -690,7 +690,7 @@ func clusterPutJoin(d *Daemon, r *http.Request, req api.ClusterPut) response.Res
 
 				logger.Debugf("Adding certificate %q (%s) to local trust store", trustedCert.Name, trustedCert.Fingerprint)
 
-				err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+				err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 					id, err := dbCluster.CreateCertificate(ctx, tx.Tx(), dbCert)
 					if err != nil {
 						return err
@@ -710,7 +710,7 @@ func clusterPutJoin(d *Daemon, r *http.Request, req api.ClusterPut) response.Res
 		}
 
 		// Update cached trusted certificates.
-		updateCertificateCache(d)
+		s.UpdateCertificateCache()
 
 		// Update local setup and possibly join the raft dqlite cluster.
 		nodes := make([]db.RaftNode, len(info.RaftNodes))
@@ -730,7 +730,7 @@ func clusterPutJoin(d *Daemon, r *http.Request, req api.ClusterPut) response.Res
 		revert.Add(func() { d.stopClusterTasks() })
 
 		// Handle optional service integration on cluster join
-		err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 			// Add the new node to the default cluster group.
 			err := tx.AddNodeToClusterGroup(ctx, "default", req.ServerName)
 			if err != nil {
@@ -744,7 +744,7 @@ func clusterPutJoin(d *Daemon, r *http.Request, req api.ClusterPut) response.Res
 		}
 
 		var nodeConfig *node.Config
-		err = d.db.Node.Transaction(context.TODO(), func(ctx context.Context, tx *db.NodeTx) error {
+		err = s.DB.Node.Transaction(context.TODO(), func(ctx context.Context, tx *db.NodeTx) error {
 			var err error
 			nodeConfig, err = node.ConfigLoad(ctx, tx)
 			return err
@@ -786,7 +786,7 @@ func clusterPutJoin(d *Daemon, r *http.Request, req api.ClusterPut) response.Res
 			logger.Errorf("Failed starting networks: %v", err)
 		}
 
-		client, err = cluster.Connect(req.ClusterAddress, d.endpoints.NetworkCert(), serverCert, r, true)
+		client, err = cluster.Connect(req.ClusterAddress, s.Endpoints.NetworkCert(), serverCert, r, true)
 		if err != nil {
 			return err
 		}
@@ -802,7 +802,7 @@ func clusterPutJoin(d *Daemon, r *http.Request, req api.ClusterPut) response.Res
 		}
 
 		// Ensure all images are available after this node has joined.
-		err = autoSyncImages(d.shutdownCtx, d)
+		err = autoSyncImages(s.ShutdownCtx, s)
 		if err != nil {
 			logger.Warn("Failed to sync images")
 		}
@@ -813,8 +813,8 @@ func clusterPutJoin(d *Daemon, r *http.Request, req api.ClusterPut) response.Res
 		return nil
 	}
 
-	resources := map[string][]string{}
-	resources["cluster"] = []string{}
+	resources := map[string][]api.URL{}
+	resources["cluster"] = []api.URL{}
 
 	op, err := operations.OperationCreate(s, "", operations.OperationClassTask, operationtype.ClusterJoin, resources, nil, run, nil, nil, r)
 	if err != nil {
@@ -836,14 +836,14 @@ func clusterPutDisable(d *Daemon, r *http.Request, req api.ClusterPut) response.
 	logger.Info("Disabling clustering", logger.Ctx{"serverName": req.ServerName})
 
 	// Close the cluster database
-	err := d.db.Cluster.Close()
+	err := s.DB.Cluster.Close()
 	if err != nil {
 		return response.SmartError(err)
 	}
 
 	// Update our TLS configuration using our original certificate.
 	for _, suffix := range []string{"crt", "key", "ca"} {
-		path := filepath.Join(d.os.VarDir, "cluster."+suffix)
+		path := filepath.Join(s.OS.VarDir, "cluster."+suffix)
 		if !shared.PathExists(path) {
 			continue
 		}
@@ -854,7 +854,7 @@ func clusterPutDisable(d *Daemon, r *http.Request, req api.ClusterPut) response.
 		}
 	}
 
-	networkCert, err := util.LoadCert(d.os.VarDir)
+	networkCert, err := util.LoadCert(s.OS.VarDir)
 	if err != nil {
 		return response.InternalError(fmt.Errorf("Failed to parse member certificate: %w", err))
 	}
@@ -1175,7 +1175,7 @@ func clusterNodesGet(d *Daemon, r *http.Request) response.Response {
 
 	var members []db.NodeInfo
 	var membersInfo []api.ClusterMember
-	err = d.db.Cluster.Transaction(r.Context(), func(ctx context.Context, tx *db.ClusterTx) error {
+	err = s.DB.Cluster.Transaction(r.Context(), func(ctx context.Context, tx *db.ClusterTx) error {
 		failureDomains, err := tx.GetFailureDomainsNames(ctx)
 		if err != nil {
 			return fmt.Errorf("Failed loading failure domains names: %w", err)
@@ -1276,7 +1276,7 @@ func clusterNodesPost(d *Daemon, r *http.Request) response.Response {
 		return response.BadRequest(err)
 	}
 
-	clustered, err := cluster.Enabled(d.db.Node)
+	clustered, err := cluster.Enabled(s.DB.Node)
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -1296,7 +1296,7 @@ func clusterNodesPost(d *Daemon, r *http.Request) response.Response {
 	// retrieving remote operations.
 	onlineNodeAddresses := make([]any, 0)
 
-	err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 		// Get the nodes.
 		members, err := tx.GetNodes(ctx)
 		if err != nil {
@@ -1330,7 +1330,7 @@ func clusterNodesPost(d *Daemon, r *http.Request) response.Response {
 	// Remove any existing join tokens for the requested cluster member, this way we only ever have one active
 	// join token for each potential new member, and it has the most recent active members list for joining.
 	// This also ensures any historically unused (but potentially published) join tokens are removed.
-	ops, err := operationsGetByType(d, r, project.Default, operationtype.ClusterJoinToken)
+	ops, err := operationsGetByType(s, r, project.Default, operationtype.ClusterJoinToken)
 	if err != nil {
 		return response.InternalError(fmt.Errorf("Failed getting cluster join token operations: %w", err))
 	}
@@ -1348,7 +1348,7 @@ func clusterNodesPost(d *Daemon, r *http.Request) response.Response {
 		if opServerName == req.ServerName {
 			// Join token operation matches requested server name, so lets cancel it.
 			logger.Warn("Cancelling duplicate join token operation", logger.Ctx{"operation": op.ID, "serverName": opServerName})
-			err = operationCancel(d, r, project.Default, op)
+			err = operationCancel(s, r, project.Default, op)
 			if err != nil {
 				return response.InternalError(fmt.Errorf("Failed to cancel operation %q: %w", op.ID, err))
 			}
@@ -1365,7 +1365,7 @@ func clusterNodesPost(d *Daemon, r *http.Request) response.Response {
 
 	// Generate fingerprint of network certificate so joining member can automatically trust the correct
 	// certificate when it is presented during the join process.
-	fingerprint, err := shared.CertFingerprintStr(string(d.endpoints.NetworkPublicKey()))
+	fingerprint, err := shared.CertFingerprintStr(string(s.Endpoints.NetworkPublicKey()))
 	if err != nil {
 		return response.InternalError(err)
 	}
@@ -1378,8 +1378,8 @@ func clusterNodesPost(d *Daemon, r *http.Request) response.Response {
 		"expiresAt":   expiry,
 	}
 
-	resources := map[string][]string{}
-	resources["cluster"] = []string{}
+	resources := map[string][]api.URL{}
+	resources["cluster"] = []api.URL{}
 
 	op, err := operations.OperationCreate(s, project.Default, operations.OperationClassToken, operationtype.ClusterJoinToken, resources, meta, nil, nil, nil, r)
 	if err != nil {
@@ -1452,7 +1452,7 @@ func clusterNodeGet(d *Daemon, r *http.Request) response.Response {
 	}
 
 	var memberInfo *api.ClusterMember
-	err = d.db.Cluster.Transaction(r.Context(), func(ctx context.Context, tx *db.ClusterTx) error {
+	err = s.DB.Cluster.Transaction(r.Context(), func(ctx context.Context, tx *db.ClusterTx) error {
 		failureDomains, err := tx.GetFailureDomainsNames(ctx)
 		if err != nil {
 			return fmt.Errorf("Failed loading failure domains names: %w", err)
@@ -1526,7 +1526,7 @@ func clusterNodeGet(d *Daemon, r *http.Request) response.Response {
 //	  "500":
 //	    $ref: "#/responses/InternalServerError"
 func clusterNodePatch(d *Daemon, r *http.Request) response.Response {
-	return updateClusterNode(d, r, true)
+	return updateClusterNode(d.State(), d.gateway, r, true)
 }
 
 // swagger:operation PUT /1.0/cluster/members/{name} cluster cluster_member_put
@@ -1559,19 +1559,17 @@ func clusterNodePatch(d *Daemon, r *http.Request) response.Response {
 //	  "500":
 //	    $ref: "#/responses/InternalServerError"
 func clusterNodePut(d *Daemon, r *http.Request) response.Response {
-	return updateClusterNode(d, r, false)
+	return updateClusterNode(d.State(), d.gateway, r, false)
 }
 
 // updateClusterNode is shared between clusterNodePut and clusterNodePatch.
-func updateClusterNode(d *Daemon, r *http.Request, isPatch bool) response.Response {
-	s := d.State()
-
+func updateClusterNode(s *state.State, gateway *cluster.Gateway, r *http.Request, isPatch bool) response.Response {
 	name, err := url.PathUnescape(mux.Vars(r)["name"])
 	if err != nil {
 		return response.SmartError(err)
 	}
 
-	leaderAddress, err := d.gateway.LeaderAddress()
+	leaderAddress, err := gateway.LeaderAddress()
 	if err != nil {
 		return response.InternalError(err)
 	}
@@ -1591,7 +1589,7 @@ func updateClusterNode(d *Daemon, r *http.Request, isPatch bool) response.Respon
 
 	var member db.NodeInfo
 	var memberInfo *api.ClusterMember
-	err = d.db.Cluster.Transaction(r.Context(), func(ctx context.Context, tx *db.ClusterTx) error {
+	err = s.DB.Cluster.Transaction(r.Context(), func(ctx context.Context, tx *db.ClusterTx) error {
 		failureDomains, err := tx.GetFailureDomainsNames(ctx)
 		if err != nil {
 			return fmt.Errorf("Failed loading failure domains names: %w", err)
@@ -1666,7 +1664,7 @@ func updateClusterNode(d *Daemon, r *http.Request, isPatch bool) response.Respon
 	}
 
 	// Update the database
-	err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 		nodeInfo, err := tx.GetNodeByName(ctx, name)
 		if err != nil {
 			return fmt.Errorf("Loading node information: %w", err)
@@ -1730,7 +1728,7 @@ func updateClusterNode(d *Daemon, r *http.Request, isPatch bool) response.Respon
 
 	// If cluster roles changed, then distribute the info to all members.
 	if s.Endpoints != nil && clusterRolesChanged(member.Roles, newRoles) {
-		cluster.NotifyHeartbeat(s, d.gateway)
+		cluster.NotifyHeartbeat(s, gateway)
 	}
 
 	requestor := request.CreateRequestor(r)
@@ -1771,11 +1769,24 @@ func clusterRolesChanged(oldRoles []db.ClusterRole, newRoles []db.ClusterRole) b
 // clusterValidateConfig validates the configuration keys/values for cluster members.
 func clusterValidateConfig(config map[string]string) error {
 	clusterConfigKeys := map[string]func(value string) error{
+		// lxddoc:generate(group=cluster, key=scheduler.instance)
+		//
+		// ---
+		//  shortdesc: Possible values are `all`, `manual` and `group`. See {ref}`clustering-instance-placement` for more information.
+		//  default: `all`
+		//  type: string
 		"scheduler.instance": validate.Optional(validate.IsOneOf("all", "group", "manual")),
 	}
 
 	for k, v := range config {
 		// User keys are free for all.
+
+		// lxddoc:generate(group=cluster, key=user.*)
+		//
+		// ---
+		//  shortdesc: Free form user key/value storage (can be used in search).
+		//  default: -
+		//  type: string
 		if strings.HasPrefix(k, "user.") {
 			continue
 		}
@@ -1824,9 +1835,15 @@ func clusterValidateConfig(config map[string]string) error {
 func clusterNodePost(d *Daemon, r *http.Request) response.Response {
 	s := d.State()
 
-	name, err := url.PathUnescape(mux.Vars(r)["name"])
+	memberName, err := url.PathUnescape(mux.Vars(r)["name"])
 	if err != nil {
 		return response.SmartError(err)
+	}
+
+	// Forward request.
+	resp := forwardedResponseToNode(s, r, memberName)
+	if resp != nil {
+		return resp
 	}
 
 	req := api.ClusterMemberPost{}
@@ -1837,15 +1854,20 @@ func clusterNodePost(d *Daemon, r *http.Request) response.Response {
 		return response.BadRequest(err)
 	}
 
-	err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-		return tx.RenameNode(ctx, name, req.ServerName)
+	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		return tx.RenameNode(ctx, memberName, req.ServerName)
 	})
 	if err != nil {
 		return response.SmartError(err)
 	}
 
+	// Update local server name.
+	d.globalConfigMu.Lock()
+	d.serverName = req.ServerName
+	d.globalConfigMu.Unlock()
+
 	requestor := request.CreateRequestor(r)
-	s.Events.SendLifecycle(projectParam(r), lifecycle.ClusterMemberRenamed.Event(req.ServerName, requestor, logger.Ctx{"old_name": name}))
+	s.Events.SendLifecycle(projectParam(r), lifecycle.ClusterMemberRenamed.Event(req.ServerName, requestor, logger.Ctx{"old_name": memberName}))
 
 	return response.EmptySyncResponse
 }
@@ -1891,7 +1913,7 @@ func clusterNodeDelete(d *Daemon, r *http.Request) response.Response {
 	}
 
 	var localInfo, leaderInfo db.NodeInfo
-	err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 		localInfo, err = tx.GetNodeByAddress(ctx, localClusterAddress)
 		if err != nil {
 			return fmt.Errorf("Failed loading local member info %q: %w", localClusterAddress, err)
@@ -1910,7 +1932,7 @@ func clusterNodeDelete(d *Daemon, r *http.Request) response.Response {
 
 	// Get information about the cluster.
 	var nodes []db.RaftNode
-	err = d.db.Node.Transaction(context.TODO(), func(ctx context.Context, tx *db.NodeTx) error {
+	err = s.DB.Node.Transaction(context.TODO(), func(ctx context.Context, tx *db.NodeTx) error {
 		var err error
 		nodes, err = tx.GetRaftNodes(ctx)
 		return err
@@ -1937,7 +1959,7 @@ func clusterNodeDelete(d *Daemon, r *http.Request) response.Response {
 		}
 
 		logger.Debugf("Redirect member delete request to %s", leader)
-		client, err := cluster.Connect(leader, d.endpoints.NetworkCert(), d.serverCert(), r, false)
+		client, err := cluster.Connect(leader, s.Endpoints.NetworkCert(), s.ServerCert(), r, false)
 		if err != nil {
 			return response.SmartError(err)
 		}
@@ -1955,7 +1977,7 @@ func clusterNodeDelete(d *Daemon, r *http.Request) response.Response {
 				return response.SmartError(err)
 			}
 
-			updateCertificateCache(d)
+			s.UpdateCertificateCache()
 		}
 
 		return response.ManualResponse(func(w http.ResponseWriter) error {
@@ -1986,7 +2008,7 @@ func clusterNodeDelete(d *Daemon, r *http.Request) response.Response {
 			if nodes[i].Address != leader && nodes[i].Role == db.RaftStandBy {
 				// Promote the remaining node.
 				nodes[i].Role = db.RaftVoter
-				err := changeMemberRole(d, r, nodes[i].Address, nodes)
+				err := changeMemberRole(s, r, nodes[i].Address, nodes)
 				if err != nil {
 					return response.SmartError(fmt.Errorf("Unable to promote remaining cluster member to leader: %w", err))
 				}
@@ -1998,7 +2020,7 @@ func clusterNodeDelete(d *Daemon, r *http.Request) response.Response {
 
 	logger.Info("Deleting member from cluster", logger.Ctx{"name": name, "force": force})
 
-	err = autoSyncImages(d.shutdownCtx, d)
+	err = autoSyncImages(s.ShutdownCtx, s)
 	if err != nil {
 		if force == 0 {
 			return response.SmartError(fmt.Errorf("Failed to sync images: %w", err))
@@ -2018,7 +2040,7 @@ func clusterNodeDelete(d *Daemon, r *http.Request) response.Response {
 	if force != 1 {
 		// Try to gracefully delete all networks and storage pools on it.
 		// Delete all networks on this node
-		client, err := cluster.Connect(address, d.endpoints.NetworkCert(), d.serverCert(), r, true)
+		client, err := cluster.Connect(address, s.Endpoints.NetworkCert(), s.ServerCert(), r, true)
 		if err != nil {
 			return response.SmartError(err)
 		}
@@ -2026,7 +2048,7 @@ func clusterNodeDelete(d *Daemon, r *http.Request) response.Response {
 		// Get a list of projects for networks.
 		var networkProjectNames []string
 
-		err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 			networkProjectNames, err = dbCluster.GetProjectNames(ctx, tx.Tx())
 			return err
 		})
@@ -2035,7 +2057,7 @@ func clusterNodeDelete(d *Daemon, r *http.Request) response.Response {
 		}
 
 		for _, networkProjectName := range networkProjectNames {
-			networks, err := d.db.Cluster.GetNetworks(networkProjectName)
+			networks, err := s.DB.Cluster.GetNetworks(networkProjectName)
 			if err != nil {
 				return response.SmartError(err)
 			}
@@ -2049,7 +2071,7 @@ func clusterNodeDelete(d *Daemon, r *http.Request) response.Response {
 		}
 
 		// Delete all the pools on this node
-		pools, err := d.db.Cluster.GetStoragePoolNames()
+		pools, err := s.DB.Cluster.GetStoragePoolNames()
 		if err != nil && !response.IsNotFoundError(err) {
 			return response.SmartError(err)
 		}
@@ -2063,12 +2085,12 @@ func clusterNodeDelete(d *Daemon, r *http.Request) response.Response {
 	}
 
 	// Remove node from the database
-	err = cluster.Purge(d.db.Cluster, name)
+	err = cluster.Purge(s.DB.Cluster, name)
 	if err != nil {
 		return response.SmartError(fmt.Errorf("Failed to remove member from database: %w", err))
 	}
 
-	err = rebalanceMemberRoles(d, r, nil)
+	err = rebalanceMemberRoles(s, d.gateway, r, nil)
 	if err != nil {
 		logger.Warnf("Failed to rebalance dqlite nodes: %v", err)
 	}
@@ -2078,7 +2100,7 @@ func clusterNodeDelete(d *Daemon, r *http.Request) response.Response {
 		return clusterPutDisable(d, r, api.ClusterPut{})
 	} else if force != 1 {
 		// Try to gracefully reset the database on the node.
-		client, err := cluster.Connect(address, d.endpoints.NetworkCert(), d.serverCert(), r, true)
+		client, err := cluster.Connect(address, s.Endpoints.NetworkCert(), s.ServerCert(), r, true)
 		if err != nil {
 			return response.SmartError(err)
 		}
@@ -2094,10 +2116,10 @@ func clusterNodeDelete(d *Daemon, r *http.Request) response.Response {
 	// Refresh the trusted certificate cache now that the member certificate has been removed.
 	// We do not need to notify the other members here because the next heartbeat will trigger member change
 	// detection and updateCertificateCache is called as part of that.
-	updateCertificateCache(d)
+	s.UpdateCertificateCache()
 
 	// Ensure all images are available after this node has been deleted.
-	err = autoSyncImages(d.shutdownCtx, d)
+	err = autoSyncImages(s.ShutdownCtx, s)
 	if err != nil {
 		logger.Warn("Failed to sync images")
 	}
@@ -2160,7 +2182,7 @@ func clusterCertificatePut(d *Daemon, r *http.Request) response.Response {
 		return response.BadRequest(fmt.Errorf("Private key must be base64 encoded PEM key: %w", err))
 	}
 
-	err = updateClusterCertificate(r.Context(), d, r, req)
+	err = updateClusterCertificate(r.Context(), s, d.gateway, r, req)
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -2171,9 +2193,7 @@ func clusterCertificatePut(d *Daemon, r *http.Request) response.Response {
 	return response.EmptySyncResponse
 }
 
-func updateClusterCertificate(ctx context.Context, d *Daemon, r *http.Request, req api.ClusterCertificatePut) error {
-	s := d.State()
-
+func updateClusterCertificate(ctx context.Context, s *state.State, gateway *cluster.Gateway, r *http.Request, req api.ClusterCertificatePut) error {
 	revert := revert.New()
 	defer revert.Fail()
 
@@ -2184,7 +2204,7 @@ func updateClusterCertificate(ctx context.Context, d *Daemon, r *http.Request, r
 		var err error
 
 		revert.Add(func() {
-			_ = d.db.Cluster.UpsertWarningLocalNode("", -1, -1, warningtype.UnableToUpdateClusterCertificate, err.Error())
+			_ = s.DB.Cluster.UpsertWarningLocalNode("", -1, -1, warningtype.UnableToUpdateClusterCertificate, err.Error())
 		})
 
 		oldCertBytes, err := os.ReadFile(shared.VarPath("cluster.crt"))
@@ -2204,7 +2224,7 @@ func updateClusterCertificate(ctx context.Context, d *Daemon, r *http.Request, r
 
 		// Get all members in cluster.
 		var members []db.NodeInfo
-		err = d.db.Cluster.Transaction(ctx, func(ctx context.Context, tx *db.ClusterTx) error {
+		err = s.DB.Cluster.Transaction(ctx, func(ctx context.Context, tx *db.ClusterTx) error {
 			members, err = tx.GetNodes(ctx)
 			if err != nil {
 				return fmt.Errorf("Failed getting cluster members: %w", err)
@@ -2241,7 +2261,7 @@ func updateClusterCertificate(ctx context.Context, d *Daemon, r *http.Request, r
 				continue
 			}
 
-			client, err = cluster.Connect(member.Address, d.endpoints.NetworkCert(), d.serverCert(), r, true)
+			client, err = cluster.Connect(member.Address, s.Endpoints.NetworkCert(), s.ServerCert(), r, true)
 			if err != nil {
 				return err
 			}
@@ -2254,7 +2274,7 @@ func updateClusterCertificate(ctx context.Context, d *Daemon, r *http.Request, r
 			// When reverting the certificate, we need to connect to the cluster members using the
 			// new certificate otherwise we'll get a bad certificate error.
 			revert.Add(func() {
-				client, err := cluster.Connect(member.Address, newCertInfo, d.serverCert(), r, true)
+				client, err := cluster.Connect(member.Address, newCertInfo, s.ServerCert(), r, true)
 				if err != nil {
 					logger.Error("Failed to connect to cluster member", logger.Ctx{"address": member.Address, "err": err})
 					return
@@ -2268,7 +2288,7 @@ func updateClusterCertificate(ctx context.Context, d *Daemon, r *http.Request, r
 		}
 	}
 
-	err := util.WriteCert(d.os.VarDir, "cluster", []byte(req.ClusterCertificate), []byte(req.ClusterCertificateKey), nil)
+	err := util.WriteCert(s.OS.VarDir, "cluster", []byte(req.ClusterCertificate), []byte(req.ClusterCertificateKey), nil)
 	if err != nil {
 		return err
 	}
@@ -2281,17 +2301,17 @@ func updateClusterCertificate(ctx context.Context, d *Daemon, r *http.Request, r
 	}
 
 	// Get the new cluster certificate struct
-	cert, err := util.LoadClusterCert(d.os.VarDir)
+	cert, err := util.LoadClusterCert(s.OS.VarDir)
 	if err != nil {
 		return err
 	}
 
 	// Update the certificate on the network endpoint and gateway
-	d.endpoints.NetworkUpdateCert(cert)
-	d.gateway.NetworkUpdateCert(cert)
+	s.Endpoints.NetworkUpdateCert(cert)
+	gateway.NetworkUpdateCert(cert)
 
 	// Resolve warning of this type
-	_ = warnings.ResolveWarningsByLocalNodeAndType(d.db.Cluster, warningtype.UnableToUpdateClusterCertificate)
+	_ = warnings.ResolveWarningsByLocalNodeAndType(s.DB.Cluster, warningtype.UnableToUpdateClusterCertificate)
 
 	revert.Success()
 
@@ -2345,12 +2365,12 @@ func internalClusterPostAccept(d *Daemon, r *http.Request) response.Response {
 
 	// Check that the pools and networks provided by the joining node have
 	// configs that match the cluster ones.
-	err = clusterCheckStoragePoolsMatch(d.db.Cluster, req.StoragePools)
+	err = clusterCheckStoragePoolsMatch(s.DB.Cluster, req.StoragePools)
 	if err != nil {
 		return response.SmartError(err)
 	}
 
-	err = clusterCheckNetworksMatch(d.db.Cluster, req.Networks)
+	err = clusterCheckNetworksMatch(s.DB.Cluster, req.Networks)
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -2362,7 +2382,7 @@ func internalClusterPostAccept(d *Daemon, r *http.Request) response.Response {
 
 	accepted := internalClusterPostAcceptResponse{
 		RaftNodes:  make([]internalRaftNode, len(nodes)),
-		PrivateKey: d.endpoints.NetworkPrivateKey(),
+		PrivateKey: s.Endpoints.NetworkPrivateKey(),
 	}
 
 	for i, node := range nodes {
@@ -2428,7 +2448,7 @@ func internalClusterPostRebalance(d *Daemon, r *http.Request) response.Response 
 	d.clusterMembershipMutex.Lock()
 	defer d.clusterMembershipMutex.Unlock()
 
-	err = rebalanceMemberRoles(d, r, nil)
+	err = rebalanceMemberRoles(s, d.gateway, r, nil)
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -2438,15 +2458,13 @@ func internalClusterPostRebalance(d *Daemon, r *http.Request) response.Response 
 
 // Check if there's a dqlite node whose role should be changed, and post a
 // change role request if so.
-func rebalanceMemberRoles(d *Daemon, r *http.Request, unavailableMembers []string) error {
-	s := d.State()
-
-	if d.shutdownCtx.Err() != nil {
+func rebalanceMemberRoles(s *state.State, gateway *cluster.Gateway, r *http.Request, unavailableMembers []string) error {
+	if s.ShutdownCtx.Err() != nil {
 		return nil
 	}
 
 again:
-	address, nodes, err := cluster.Rebalance(s, d.gateway, unavailableMembers)
+	address, nodes, err := cluster.Rebalance(s, gateway, unavailableMembers)
 	if err != nil {
 		return err
 	}
@@ -2462,12 +2480,12 @@ again:
 			continue
 		}
 
-		if cluster.HasConnectivity(d.endpoints.NetworkCert(), d.serverCert(), address) {
+		if cluster.HasConnectivity(s.Endpoints.NetworkCert(), s.ServerCert(), address) {
 			break
 		}
 
 		logger.Info("Demoting offline member during rebalance", logger.Ctx{"candidateAddress": node.Address})
-		err := d.gateway.DemoteOfflineNode(node.ID)
+		err := gateway.DemoteOfflineNode(node.ID)
 		if err != nil {
 			return fmt.Errorf("Demote offline node %s: %w", node.Address, err)
 		}
@@ -2477,7 +2495,7 @@ again:
 
 	// Tell the node to promote itself.
 	logger.Info("Promoting member during rebalance", logger.Ctx{"candidateAddress": address})
-	err = changeMemberRole(d, r, address, nodes)
+	err = changeMemberRole(s, r, address, nodes)
 	if err != nil {
 		return err
 	}
@@ -2487,13 +2505,13 @@ again:
 
 // Check if there are nodes not part of the raft configuration and add them in
 // case.
-func upgradeNodesWithoutRaftRole(d *Daemon) error {
-	if d.shutdownCtx.Err() != nil {
+func upgradeNodesWithoutRaftRole(s *state.State, gateway *cluster.Gateway) error {
+	if s.ShutdownCtx.Err() != nil {
 		return nil
 	}
 
 	var members []db.NodeInfo
-	err := d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+	err := s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 		var err error
 		members, err = tx.GetNodes(ctx)
 		if err != nil {
@@ -2506,12 +2524,12 @@ func upgradeNodesWithoutRaftRole(d *Daemon) error {
 		return err
 	}
 
-	return cluster.UpgradeMembersWithoutRole(d.gateway, members)
+	return cluster.UpgradeMembersWithoutRole(gateway, members)
 }
 
 // Post a change role request to the member with the given address. The nodes
 // slice contains details about all members, including the one being changed.
-func changeMemberRole(d *Daemon, r *http.Request, address string, nodes []db.RaftNode) error {
+func changeMemberRole(s *state.State, r *http.Request, address string, nodes []db.RaftNode) error {
 	post := &internalClusterPostAssignRequest{}
 	for _, node := range nodes {
 		post.RaftNodes = append(post.RaftNodes, internalRaftNode{
@@ -2522,7 +2540,7 @@ func changeMemberRole(d *Daemon, r *http.Request, address string, nodes []db.Raf
 		})
 	}
 
-	client, err := cluster.Connect(address, d.endpoints.NetworkCert(), d.serverCert(), r, true)
+	client, err := cluster.Connect(address, s.Endpoints.NetworkCert(), s.ServerCert(), r, true)
 	if err != nil {
 		return err
 	}
@@ -2536,9 +2554,7 @@ func changeMemberRole(d *Daemon, r *http.Request, address string, nodes []db.Raf
 }
 
 // Try to handover the role of this member to another one.
-func handoverMemberRole(d *Daemon) error {
-	s := d.State()
-
+func handoverMemberRole(s *state.State, gateway *cluster.Gateway) error {
 	// If we aren't clustered, there's nothing to do.
 	clustered, err := cluster.Enabled(s.DB.Node)
 	if err != nil {
@@ -2560,7 +2576,7 @@ func handoverMemberRole(d *Daemon) error {
 
 	// Find the cluster leader.
 findLeader:
-	leader, err := d.gateway.LeaderAddress()
+	leader, err := gateway.LeaderAddress()
 	if err != nil {
 		return err
 	}
@@ -2571,7 +2587,7 @@ findLeader:
 
 	if leader == localClusterAddress {
 		logger.Info("Transferring leadership", logCtx)
-		err := d.gateway.TransferLeadership()
+		err := gateway.TransferLeadership()
 		if err != nil {
 			return fmt.Errorf("Failed to transfer leadership: %w", err)
 		}
@@ -2580,7 +2596,7 @@ findLeader:
 	}
 
 	logger.Info("Handing over cluster member role", logCtx)
-	client, err := cluster.Connect(leader, d.endpoints.NetworkCert(), d.serverCert(), nil, true)
+	client, err := cluster.Connect(leader, s.Endpoints.NetworkCert(), s.ServerCert(), nil, true)
 	if err != nil {
 		return fmt.Errorf("Failed handing over cluster member role: %w", err)
 	}
@@ -2686,7 +2702,7 @@ func internalClusterPostHandover(d *Daemon, r *http.Request) response.Response {
 	}
 
 	logger.Info("Promoting member during handover", logger.Ctx{"address": localClusterAddress, "losingAddress": req.Address, "candidateAddress": target})
-	err = changeMemberRole(d, r, target, nodes)
+	err = changeMemberRole(s, r, target, nodes)
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -2699,7 +2715,7 @@ func internalClusterPostHandover(d *Daemon, r *http.Request) response.Response {
 	}
 
 	logger.Info("Demoting member during handover", logger.Ctx{"address": localClusterAddress, "losingAddress": req.Address})
-	err = changeMemberRole(d, r, req.Address, nodes)
+	err = changeMemberRole(s, r, req.Address, nodes)
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -2813,6 +2829,8 @@ func clusterCheckNetworksMatch(cluster *db.Cluster, reqNetworks []api.InitNetwor
 
 // Used as low-level recovering helper.
 func internalClusterRaftNodeDelete(d *Daemon, r *http.Request) response.Response {
+	s := d.State()
+
 	address, err := url.PathUnescape(mux.Vars(r)["address"])
 	if err != nil {
 		return response.SmartError(err)
@@ -2823,7 +2841,7 @@ func internalClusterRaftNodeDelete(d *Daemon, r *http.Request) response.Response
 		return response.SmartError(err)
 	}
 
-	err = rebalanceMemberRoles(d, r, nil)
+	err = rebalanceMemberRoles(s, d.gateway, r, nil)
 	if err != nil && !errors.Is(err, cluster.ErrNotLeader) {
 		logger.Warn("Could not rebalance cluster member roles after raft member removal", logger.Ctx{"err": err})
 	}
@@ -2937,7 +2955,7 @@ func clusterNodeStatePost(d *Daemon, r *http.Request) response.Response {
 
 	if req.Action == "evacuate" {
 		stopFunc := func(inst instance.Instance) error {
-			l := logger.AddContext(logger.Log, logger.Ctx{"project": inst.Project().Name, "instance": inst.Name()})
+			l := logger.AddContext(logger.Ctx{"project": inst.Project().Name, "instance": inst.Name()})
 
 			// Get the shutdown timeout for the instance.
 			timeout := inst.ExpandedConfig()["boot.host_shutdown_timeout"]
@@ -2959,7 +2977,7 @@ func clusterNodeStatePost(d *Daemon, r *http.Request) response.Response {
 			}
 
 			// Mark the instance as RUNNING in volatile so its state can be properly restored.
-			err = inst.VolatileSet(map[string]string{"volatile.last_state.power": "RUNNING"})
+			err = inst.VolatileSet(map[string]string{"volatile.last_state.power": instance.PowerStateRunning})
 			if err != nil {
 				l.Warn("Failed to set instance state to RUNNING", logger.Ctx{"err": err})
 			}
@@ -3009,7 +3027,7 @@ func clusterNodeStatePost(d *Daemon, r *http.Request) response.Response {
 			return nil
 		}
 
-		return evacuateClusterMember(d, r, req.Mode, stopFunc, migrateFunc)
+		return evacuateClusterMember(s, d.gateway, r, req.Mode, stopFunc, migrateFunc)
 	} else if req.Action == "restore" {
 		return restoreClusterMember(d, r)
 	}
@@ -3050,6 +3068,7 @@ func internalClusterHeal(d *Daemon, r *http.Request) response.Response {
 			return err
 		}
 
+		dest = dest.UseProject(inst.Project().Name)
 		dest = dest.UseTarget(targetMemberInfo.Name)
 
 		migrateOp, err := dest.MigrateInstance(inst.Name(), req)
@@ -3062,14 +3081,29 @@ func internalClusterHeal(d *Daemon, r *http.Request) response.Response {
 			return err
 		}
 
+		if !startInstance || live {
+			return nil
+		}
+
+		// Start it back up on target.
+		startOp, err := dest.UpdateInstanceState(inst.Name(), api.InstanceStatePut{Action: "start"}, "")
+		if err != nil {
+			return err
+		}
+
+		err = startOp.Wait()
+		if err != nil {
+			return err
+		}
+
 		return nil
 	}
 
-	return evacuateClusterMember(d, r, "migrate", nil, migrateFunc)
+	return evacuateClusterMember(d.State(), d.gateway, r, "migrate", nil, migrateFunc)
 }
 
-func evacuateClusterSetState(d *Daemon, name string, state int) error {
-	err := d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+func evacuateClusterSetState(s *state.State, name string, state int) error {
+	err := s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 		// Get the node.
 		node, err := tx.GetNodeByName(ctx, name)
 		if err != nil {
@@ -3109,9 +3143,7 @@ func evacuateClusterSetState(d *Daemon, name string, state int) error {
 // evacuateHostShutdownDefaultTimeout default timeout (in seconds) for waiting for clean shutdown to complete.
 const evacuateHostShutdownDefaultTimeout = 30
 
-func evacuateClusterMember(d *Daemon, r *http.Request, mode string, stopInstance evacuateStopFunc, migrateInstance evacuateMigrateFunc) response.Response {
-	s := d.State()
-
+func evacuateClusterMember(s *state.State, gateway *cluster.Gateway, r *http.Request, mode string, stopInstance evacuateStopFunc, migrateInstance evacuateMigrateFunc) response.Response {
 	nodeName, err := url.PathUnescape(mux.Vars(r)["name"])
 	if err != nil {
 		return response.SmartError(err)
@@ -3119,7 +3151,7 @@ func evacuateClusterMember(d *Daemon, r *http.Request, mode string, stopInstance
 
 	// The instances are retrieved in a separate transaction, after the node is in EVACUATED state.
 	var dbInstances []dbCluster.Instance
-	err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 		// If evacuating, consider only the instances on the node which needs to be evacuated.
 		dbInstances, err = dbCluster.GetInstances(ctx, tx.Tx(), dbCluster.InstanceFilter{Node: &nodeName})
 		if err != nil {
@@ -3149,21 +3181,21 @@ func evacuateClusterMember(d *Daemon, r *http.Request, mode string, stopInstance
 		defer revert.Fail()
 
 		// Set node status to EVACUATED.
-		err := evacuateClusterSetState(d, nodeName, db.ClusterMemberStateEvacuated)
+		err := evacuateClusterSetState(s, nodeName, db.ClusterMemberStateEvacuated)
 		if err != nil {
 			return err
 		}
 
 		// Ensure node is put into its previous state if anything fails.
 		revert.Add(func() {
-			_ = evacuateClusterSetState(d, nodeName, db.ClusterMemberStateCreated)
+			_ = evacuateClusterSetState(s, nodeName, db.ClusterMemberStateCreated)
 		})
 
 		ctx := context.TODO()
 
 		opts := evacuateOpts{
 			s:               s,
-			gateway:         d.gateway,
+			gateway:         gateway,
 			r:               r,
 			instances:       instances,
 			mode:            mode,
@@ -3199,7 +3231,7 @@ func evacuateInstances(ctx context.Context, opts evacuateOpts) error {
 
 	for _, inst := range opts.instances {
 		instProject := inst.Project()
-		l := logger.AddContext(logger.Log, logger.Ctx{"project": instProject.Name, "instance": inst.Name()})
+		l := logger.AddContext(logger.Ctx{"project": instProject.Name, "instance": inst.Name()})
 
 		// Check if migratable.
 		migrate, live := inst.CanMigrate()
@@ -3256,13 +3288,11 @@ func evacuateInstances(ctx context.Context, opts evacuateOpts) error {
 
 		targetMemberInfo, err := evacuateClusterSelectTarget(ctx, opts.s, opts.gateway, inst, candidateMembers)
 		if err != nil {
-			return err
-		}
-
-		// Skip migration if no target available.
-		if targetMemberInfo == nil {
-			l.Warn("No migration target available for instance")
-			continue
+			if api.StatusErrorCheck(err, http.StatusNotFound) {
+				// Skip migration if no target is available
+				l.Warn("No migration target available for instance")
+				continue
+			}
 		}
 
 		// Start migrating the instance.
@@ -3274,7 +3304,8 @@ func evacuateInstances(ctx context.Context, opts evacuateOpts) error {
 			_ = inst.VolatileSet(map[string]string{"volatile.evacuate.origin": opts.srcMemberName})
 		}
 
-		err = opts.migrateInstance(opts.s, opts.r, inst, targetMemberInfo, live, isRunning, metadata, opts.op)
+		start := isRunning || instanceShouldAutoStart(inst)
+		err = opts.migrateInstance(opts.s, opts.r, inst, targetMemberInfo, live, start, metadata, opts.op)
 		if err != nil {
 			return err
 		}
@@ -3293,7 +3324,7 @@ func restoreClusterMember(d *Daemon, r *http.Request) response.Response {
 
 	// List the instances.
 	var dbInstances []dbCluster.Instance
-	err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 		dbInstances, err = dbCluster.GetInstances(ctx, tx.Tx())
 		if err != nil {
 			return fmt.Errorf("Failed to get instances: %w", err)
@@ -3334,14 +3365,14 @@ func restoreClusterMember(d *Daemon, r *http.Request) response.Response {
 		defer revert.Fail()
 
 		// Set node status to CREATED.
-		err := evacuateClusterSetState(d, originName, db.ClusterMemberStateCreated)
+		err := evacuateClusterSetState(s, originName, db.ClusterMemberStateCreated)
 		if err != nil {
 			return err
 		}
 
 		// Ensure node is put into its previous state if anything fails.
 		revert.Add(func() {
-			_ = evacuateClusterSetState(d, originName, db.ClusterMemberStateEvacuated)
+			_ = evacuateClusterSetState(s, originName, db.ClusterMemberStateEvacuated)
 		})
 
 		var source lxd.InstanceServer
@@ -3352,7 +3383,7 @@ func restoreClusterMember(d *Daemon, r *http.Request) response.Response {
 		// Restart the local instances.
 		for _, inst := range localInstances {
 			// Don't start instances which were stopped by the user.
-			if inst.LocalConfig()["volatile.last_state.power"] != "RUNNING" {
+			if inst.LocalConfig()["volatile.last_state.power"] != instance.PowerStateRunning {
 				continue
 			}
 
@@ -3373,7 +3404,7 @@ func restoreClusterMember(d *Daemon, r *http.Request) response.Response {
 
 		// Migrate back the remote instances.
 		for _, inst := range instances {
-			l := logger.AddContext(logger.Log, logger.Ctx{"project": inst.Project().Name, "instance": inst.Name()})
+			l := logger.AddContext(logger.Ctx{"project": inst.Project().Name, "instance": inst.Name()})
 
 			// Check if live-migratable.
 			_, live := inst.CanMigrate()
@@ -3381,7 +3412,7 @@ func restoreClusterMember(d *Daemon, r *http.Request) response.Response {
 			metadata["evacuation_progress"] = fmt.Sprintf("Migrating %q in project %q from %q", inst.Name(), inst.Project().Name, inst.Location())
 			_ = op.UpdateMetadata(metadata)
 
-			err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+			err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 				sourceNode, err = tx.GetNodeByName(ctx, inst.Location())
 				if err != nil {
 					return fmt.Errorf("Failed to get node %q: %w", inst.Location(), err)
@@ -3393,7 +3424,7 @@ func restoreClusterMember(d *Daemon, r *http.Request) response.Response {
 				return fmt.Errorf("Failed to get node: %w", err)
 			}
 
-			source, err = cluster.Connect(sourceNode.Address, d.endpoints.NetworkCert(), d.serverCert(), r, true)
+			source, err = cluster.Connect(sourceNode.Address, s.Endpoints.NetworkCert(), s.ServerCert(), r, true)
 			if err != nil {
 				return fmt.Errorf("Failed to connect to source: %w", err)
 			}
@@ -3540,7 +3571,7 @@ func restoreClusterMember(d *Daemon, r *http.Request) response.Response {
 func clusterGroupsPost(d *Daemon, r *http.Request) response.Response {
 	s := d.State()
 
-	clustered, err := cluster.Enabled(d.db.Node)
+	clustered, err := cluster.Enabled(s.DB.Node)
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -3563,7 +3594,7 @@ func clusterGroupsPost(d *Daemon, r *http.Request) response.Response {
 		return response.BadRequest(err)
 	}
 
-	err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 		obj := dbCluster.ClusterGroup{
 			Name:        req.Name,
 			Description: req.Description,
@@ -3676,7 +3707,9 @@ func clusterGroupsPost(d *Daemon, r *http.Request) response.Response {
 //	  "500":
 //	    $ref: "#/responses/InternalServerError"
 func clusterGroupsGet(d *Daemon, r *http.Request) response.Response {
-	clustered, err := cluster.Enabled(d.db.Node)
+	s := d.State()
+
+	clustered, err := cluster.Enabled(s.DB.Node)
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -3689,7 +3722,7 @@ func clusterGroupsGet(d *Daemon, r *http.Request) response.Response {
 
 	var result any
 
-	err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 		if recursion {
 			clusterGroups, err := dbCluster.GetClusterGroups(ctx, tx.Tx())
 			if err != nil {
@@ -3767,12 +3800,14 @@ func clusterGroupsGet(d *Daemon, r *http.Request) response.Response {
 //	  "500":
 //	    $ref: "#/responses/InternalServerError"
 func clusterGroupGet(d *Daemon, r *http.Request) response.Response {
+	s := d.State()
+
 	name, err := url.PathUnescape(mux.Vars(r)["name"])
 	if err != nil {
 		return response.SmartError(err)
 	}
 
-	clustered, err := cluster.Enabled(d.db.Node)
+	clustered, err := cluster.Enabled(s.DB.Node)
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -3783,7 +3818,7 @@ func clusterGroupGet(d *Daemon, r *http.Request) response.Response {
 
 	var group *dbCluster.ClusterGroup
 
-	err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 		// Get the cluster group.
 		group, err = dbCluster.GetClusterGroup(ctx, tx.Tx(), name)
 		if err != nil {
@@ -3853,7 +3888,7 @@ func clusterGroupPost(d *Daemon, r *http.Request) response.Response {
 		return response.Forbidden(errors.New(`The "default" group cannot be renamed`))
 	}
 
-	clustered, err := cluster.Enabled(d.db.Node)
+	clustered, err := cluster.Enabled(s.DB.Node)
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -3874,7 +3909,7 @@ func clusterGroupPost(d *Daemon, r *http.Request) response.Response {
 		return response.BadRequest(err)
 	}
 
-	err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 		// Check that the name isn't already in use.
 		_, err = dbCluster.GetClusterGroup(ctx, tx.Tx(), req.Name)
 		if err == nil {
@@ -3937,7 +3972,7 @@ func clusterGroupPut(d *Daemon, r *http.Request) response.Response {
 		return response.SmartError(err)
 	}
 
-	clustered, err := cluster.Enabled(d.db.Node)
+	clustered, err := cluster.Enabled(s.DB.Node)
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -3954,7 +3989,7 @@ func clusterGroupPut(d *Daemon, r *http.Request) response.Response {
 		return response.BadRequest(err)
 	}
 
-	err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 		group, err := dbCluster.GetClusterGroup(ctx, tx.Tx(), name)
 		if err != nil {
 			return err
@@ -4079,7 +4114,7 @@ func clusterGroupPatch(d *Daemon, r *http.Request) response.Response {
 		return response.SmartError(err)
 	}
 
-	clustered, err := cluster.Enabled(d.db.Node)
+	clustered, err := cluster.Enabled(s.DB.Node)
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -4091,7 +4126,7 @@ func clusterGroupPatch(d *Daemon, r *http.Request) response.Response {
 	var clusterGroup *api.ClusterGroup
 	var dbClusterGroup *dbCluster.ClusterGroup
 
-	err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 		dbClusterGroup, err = dbCluster.GetClusterGroup(ctx, tx.Tx(), name)
 		if err != nil {
 			return err
@@ -4137,7 +4172,7 @@ func clusterGroupPatch(d *Daemon, r *http.Request) response.Response {
 		req.Members = clusterGroup.Members
 	}
 
-	err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 		obj := dbCluster.ClusterGroup{
 			Name:        dbClusterGroup.Name,
 			Description: req.Description,
@@ -4252,7 +4287,7 @@ func clusterGroupDelete(d *Daemon, r *http.Request) response.Response {
 		return response.Forbidden(fmt.Errorf("The 'default' cluster group cannot be deleted"))
 	}
 
-	err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 		members, err := tx.GetClusterGroupNodes(ctx, name)
 		if err != nil {
 			return err
@@ -4373,94 +4408,102 @@ func evacuateClusterSelectTarget(ctx context.Context, s *state.State, gateway *c
 
 func autoHealClusterTask(d *Daemon) (task.Func, task.Schedule) {
 	f := func(ctx context.Context) {
+		s := d.State()
+		healingThreshold := s.GlobalConfig.ClusterHealingThreshold()
+		if healingThreshold == 0 {
+			return // Skip healing if it's disabled.
+		}
+
 		leader, err := d.gateway.LeaderAddress()
 		if err != nil {
 			if errors.Is(err, cluster.ErrNodeIsNotClustered) {
-				return // No error if not clustered.
+				return // Skip healing if not clustered.
 			}
 
 			logger.Error("Failed to get leader cluster member address", logger.Ctx{"err": err})
 			return
 		}
 
-		if d.State().LocalConfig.ClusterAddress() != leader {
-			logger.Debug("Skipping heal cluster task since we're not leader")
-			return
+		if s.LocalConfig.ClusterAddress() != leader {
+			return // Skip healing if not cluster leader.
+		}
+
+		var offlineMembers []db.NodeInfo
+		{
+			var members []db.NodeInfo
+			err = s.DB.Cluster.Transaction(ctx, func(ctx context.Context, tx *db.ClusterTx) error {
+				members, err = tx.GetNodes(ctx)
+				if err != nil {
+					return fmt.Errorf("Failed getting cluster members: %w", err)
+				}
+
+				return nil
+			})
+			if err != nil {
+				logger.Error("Failed healing cluster instances", logger.Ctx{"err": err})
+				return
+			}
+
+			for _, member := range members {
+				// Ignore members which have been evacuated, and those which haven't exceeded the
+				// healing offline trigger threshold.
+				if member.State == db.ClusterMemberStateEvacuated || !member.IsOffline(healingThreshold) {
+					continue
+				}
+
+				offlineMembers = append(offlineMembers, member)
+			}
+		}
+
+		if len(offlineMembers) == 0 {
+			return // Skip healing if there are no cluster members to evacuate.
 		}
 
 		opRun := func(op *operations.Operation) error {
-			return autoHealCluster(ctx, d)
+			err := autoHealCluster(ctx, s, offlineMembers)
+			if err != nil {
+				logger.Error("Failed healing cluster instances", logger.Ctx{"err": err})
+				return err
+			}
+
+			return nil
 		}
 
-		op, err := operations.OperationCreate(d.State(), "", operations.OperationClassTask, operationtype.ClusterHeal, nil, nil, opRun, nil, nil, nil)
+		op, err := operations.OperationCreate(s, "", operations.OperationClassTask, operationtype.ClusterHeal, nil, nil, opRun, nil, nil, nil)
 		if err != nil {
-			logger.Error("Failed starting heal cluster operation", logger.Ctx{"err": err})
+			logger.Error("Failed creating cluster instances heal operation", logger.Ctx{"err": err})
 			return
 		}
 
 		err = op.Start()
 		if err != nil {
-			logger.Error("Failed healing cluster instances", logger.Ctx{"err": err})
+			logger.Error("Failed starting cluster instances heal operation", logger.Ctx{"err": err})
 			return
 		}
 
-		_, _ = op.Wait(ctx)
+		err = op.Wait(ctx)
+		if err != nil {
+			logger.Error("Failed healing cluster instances", logger.Ctx{"err": err})
+			return
+		}
 	}
 
 	return f, task.Every(time.Minute)
 }
 
-func autoHealCluster(ctx context.Context, d *Daemon) error {
-	s := d.State()
-	healingThreshold := s.GlobalConfig.ClusterHealingThreshold()
-
-	// Skip healing if it's disabled.
-	if healingThreshold == 0 {
-		return nil
-	}
-
-	var members []db.NodeInfo
-	var err error
-
-	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-		members, err = tx.GetNodes(ctx)
-		if err != nil {
-			return fmt.Errorf("Failed getting cluster members: %w", err)
-		}
-
-		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("Failed healing cluster instances: %w", err)
-	}
-
-	var offlineMembers []db.NodeInfo
-
-	for _, member := range members {
-		// Ignore members which have been evacuated, and those which haven't exceeded the healing threshold.
-		if member.State == db.ClusterMemberStateEvacuated || !member.IsOffline(healingThreshold) {
-			continue
-		}
-
-		offlineMembers = append(offlineMembers, member)
-	}
-
-	// Skip healing if there are no members to evacuate.
-	if len(offlineMembers) == 0 {
-		return nil
-	}
-
+func autoHealCluster(ctx context.Context, s *state.State, offlineMembers []db.NodeInfo) error {
 	logger.Info("Healing cluster instances")
 
-	dest, err := cluster.Connect(s.LocalConfig.ClusterAddress(), d.endpoints.NetworkCert(), d.serverCert(), nil, true)
+	dest, err := cluster.Connect(s.LocalConfig.ClusterAddress(), s.Endpoints.NetworkCert(), s.ServerCert(), nil, true)
 	if err != nil {
 		return err
 	}
 
 	for _, member := range offlineMembers {
+		logger.Info("Healing cluster member instances", logger.Ctx{"member": member.Name})
 		_, _, err = dest.RawQuery("POST", fmt.Sprintf("/internal/cluster/heal/%s", member.Name), nil, "")
 		if err != nil {
-			return err
+			return fmt.Errorf("Failed evacuating cluster member %q: %w", member.Name, err)
 		}
 	}
 

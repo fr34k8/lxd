@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,6 +27,8 @@ import (
 	"github.com/lxc/lxd/shared"
 	"github.com/lxc/lxd/shared/api"
 	"github.com/lxc/lxd/shared/logger"
+	"github.com/lxc/lxd/shared/version"
+	"github.com/lxc/lxd/shared/ws"
 )
 
 type consoleWs struct {
@@ -92,7 +95,7 @@ func (s *consoleWs) connectConsole(op *operations.Operation, r *http.Request, w 
 
 	for fd, fdSecret := range s.fds {
 		if secret == fdSecret {
-			conn, err := shared.WebsocketUpgrader.Upgrade(w, r, nil)
+			conn, err := ws.Upgrader.Upgrade(w, r, nil)
 			if err != nil {
 				return err
 			}
@@ -136,7 +139,7 @@ func (s *consoleWs) connectVGA(op *operations.Operation, r *http.Request, w http
 			continue
 		}
 
-		conn, err := shared.WebsocketUpgrader.Upgrade(w, r, nil)
+		conn, err := ws.Upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return err
 		}
@@ -162,7 +165,14 @@ func (s *consoleWs) connectVGA(op *operations.Operation, r *http.Request, w http
 
 		// Mirror the console and websocket.
 		go func() {
-			shared.WebsocketConsoleMirror(conn, console, console)
+			defer logger.Debug("Finished mirroring websocket to console")
+
+			logger.Debug("Started mirroring websocket")
+			readDone, writeDone := ws.Mirror(context.Background(), conn, console)
+
+			<-readDone
+			logger.Debugf("Finished mirroring console to websocket")
+			<-writeDone
 		}()
 
 		s.connsLock.Lock()
@@ -268,16 +278,16 @@ func (s *consoleWs) doConsole(op *operations.Operation) error {
 	// Mirror the console and websocket.
 	mirrorDoneCh := make(chan struct{})
 	go func() {
-		defer logger.Debugf("Finished mirroring websocket to console")
+		defer logger.Debug("Finished mirroring websocket to console")
 		s.connsLock.Lock()
 		conn := s.conns[0]
 		s.connsLock.Unlock()
 
-		logger.Debugf("Started mirroring websocket")
-		readDone, writeDone := shared.WebsocketConsoleMirror(conn, console, console)
+		logger.Debug("Started mirroring websocket")
+		readDone, writeDone := ws.Mirror(context.Background(), conn, console)
 
 		<-readDone
-		logger.Debugf("Finished mirroring console to websocket")
+		logger.Debug("Finished mirroring console to websocket")
 		<-writeDone
 		close(mirrorDoneCh)
 	}()
@@ -401,6 +411,8 @@ func (s *consoleWs) doVGA(op *operations.Operation) error {
 //	  "500":
 //	    $ref: "#/responses/InternalServerError"
 func instanceConsolePost(d *Daemon, r *http.Request) response.Response {
+	s := d.State()
+
 	instanceType, err := urlInstanceTypeDetect(r)
 	if err != nil {
 		return response.SmartError(err)
@@ -428,13 +440,13 @@ func instanceConsolePost(d *Daemon, r *http.Request) response.Response {
 	}
 
 	// Forward the request if the container is remote.
-	client, err := cluster.ConnectIfInstanceIsRemote(d.db.Cluster, projectName, name, d.endpoints.NetworkCert(), d.serverCert(), r, instanceType)
+	client, err := cluster.ConnectIfInstanceIsRemote(s.DB.Cluster, projectName, name, s.Endpoints.NetworkCert(), s.ServerCert(), r, instanceType)
 	if err != nil {
 		return response.SmartError(err)
 	}
 
 	if client != nil {
-		url := api.NewURL().Path("1.0", "instances", name, "console").Project(projectName)
+		url := api.NewURL().Path(version.APIVersion, "instances", name, "console").Project(projectName)
 		resp, _, err := client.RawQuery("POST", url.String(), post, "")
 		if err != nil {
 			return response.SmartError(err)
@@ -457,7 +469,7 @@ func instanceConsolePost(d *Daemon, r *http.Request) response.Response {
 		return response.BadRequest(fmt.Errorf("Unknown console type %q", post.Type))
 	}
 
-	inst, err := instance.LoadByProjectAndName(d.State(), projectName, name)
+	inst, err := instance.LoadByProjectAndName(s, projectName, name)
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -494,14 +506,14 @@ func instanceConsolePost(d *Daemon, r *http.Request) response.Response {
 	ws.height = post.Height
 	ws.protocol = post.Type
 
-	resources := map[string][]string{}
-	resources["instances"] = []string{ws.instance.Name()}
+	resources := map[string][]api.URL{}
+	resources["instances"] = []api.URL{*api.NewURL().Path(version.APIVersion, "instances", ws.instance.Name())}
 
 	if inst.Type() == instancetype.Container {
 		resources["containers"] = resources["instances"]
 	}
 
-	op, err := operations.OperationCreate(d.State(), projectName, operations.OperationClassWebsocket, operationtype.ConsoleShow, resources, ws.Metadata(), ws.Do, nil, ws.Connect, r)
+	op, err := operations.OperationCreate(s, projectName, operations.OperationClassWebsocket, operationtype.ConsoleShow, resources, ws.Metadata(), ws.Do, nil, ws.Connect, r)
 	if err != nil {
 		return response.InternalError(err)
 	}
@@ -541,6 +553,8 @@ func instanceConsolePost(d *Daemon, r *http.Request) response.Response {
 //	  "500":
 //	    $ref: "#/responses/InternalServerError"
 func instanceConsoleLogGet(d *Daemon, r *http.Request) response.Response {
+	s := d.State()
+
 	instanceType, err := urlInstanceTypeDetect(r)
 	if err != nil {
 		return response.SmartError(err)
@@ -557,7 +571,7 @@ func instanceConsoleLogGet(d *Daemon, r *http.Request) response.Response {
 	}
 
 	// Forward the request if the container is remote.
-	resp, err := forwardedResponseIfInstanceIsRemote(d, r, projectName, name, instanceType)
+	resp, err := forwardedResponseIfInstanceIsRemote(s, r, projectName, name, instanceType)
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -570,7 +584,7 @@ func instanceConsoleLogGet(d *Daemon, r *http.Request) response.Response {
 		return response.BadRequest(fmt.Errorf("Querying the console buffer requires liblxc >= 3.0"))
 	}
 
-	inst, err := instance.LoadByProjectAndName(d.State(), projectName, name)
+	inst, err := instance.LoadByProjectAndName(s, projectName, name)
 	if err != nil {
 		return response.SmartError(err)
 	}

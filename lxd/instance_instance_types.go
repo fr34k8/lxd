@@ -13,6 +13,7 @@ import (
 
 	"github.com/lxc/lxd/lxd/db/operationtype"
 	"github.com/lxc/lxd/lxd/operations"
+	"github.com/lxc/lxd/lxd/state"
 	"github.com/lxc/lxd/lxd/task"
 	"github.com/lxc/lxd/lxd/util"
 	"github.com/lxc/lxd/shared"
@@ -24,7 +25,7 @@ type instanceType struct {
 	// Amount of CPUs (can be a fraction)
 	CPU float32 `yaml:"cpu"`
 
-	// Amount of memory in GB
+	// Amount of memory in GiB
 	Memory float32 `yaml:"mem"`
 }
 
@@ -67,55 +68,44 @@ func instanceLoadCache() error {
 }
 
 func instanceRefreshTypesTask(d *Daemon) (task.Func, task.Schedule) {
-	// This is basically a check of whether we're on Go >= 1.8 and
-	// http.Request has cancellation support. If that's the case, it will
-	// be used internally by instanceRefreshTypes to terminate gracefully,
-	// otherwise we'll wrap instanceRefreshTypes in a goroutine and force
-	// returning in case the context expires.
-	_, hasCancellationSupport := any(&http.Request{}).(util.ContextAwareRequest)
 	f := func(ctx context.Context) {
-		opRun := func(op *operations.Operation) error {
-			if hasCancellationSupport {
-				return instanceRefreshTypes(ctx, d)
-			}
+		s := d.State()
 
-			ch := make(chan error)
-			go func() {
-				ch <- instanceRefreshTypes(ctx, d)
-			}()
-			select {
-			case <-ctx.Done():
-				return nil
-			case err := <-ch:
-				return err
-			}
+		opRun := func(op *operations.Operation) error {
+			return instanceRefreshTypes(ctx, s)
 		}
 
-		op, err := operations.OperationCreate(d.State(), "", operations.OperationClassTask, operationtype.InstanceTypesUpdate, nil, nil, opRun, nil, nil, nil)
+		op, err := operations.OperationCreate(s, "", operations.OperationClassTask, operationtype.InstanceTypesUpdate, nil, nil, opRun, nil, nil, nil)
 		if err != nil {
-			logger.Error("Failed to start instance types update operation", logger.Ctx{"err": err})
+			logger.Error("Failed creating instance types update operation", logger.Ctx{"err": err})
 			return
 		}
 
 		logger.Info("Updating instance types")
 		err = op.Start()
 		if err != nil {
-			logger.Error("Failed to update instance types", logger.Ctx{"err": err})
+			logger.Error("Failed starting instance types update operation", logger.Ctx{"err": err})
+			return
 		}
 
-		_, _ = op.Wait(ctx)
+		err = op.Wait(ctx)
+		if err != nil {
+			logger.Error("Failed updating instance types", logger.Ctx{"err": err})
+			return
+		}
+
 		logger.Info("Done updating instance types")
 	}
 
 	return f, task.Daily()
 }
 
-func instanceRefreshTypes(ctx context.Context, d *Daemon) error {
+func instanceRefreshTypes(ctx context.Context, s *state.State) error {
 	// Attempt to download the new definitions
 	downloadParse := func(filename string, target any) error {
 		url := fmt.Sprintf("https://images.linuxcontainers.org/meta/instance-types/%s", filename)
 
-		httpClient, err := util.HTTPClient("", d.proxy)
+		httpClient, err := util.HTTPClient("", s.Proxy)
 		if err != nil {
 			return err
 		}
@@ -280,7 +270,7 @@ func instanceParseType(value string) (map[string]string, error) {
 	// Handle memory
 	if limits.Memory > 0 {
 		rawLimit := int64(limits.Memory * 1024)
-		out["limits.memory"] = fmt.Sprintf("%dMB", rawLimit)
+		out["limits.memory"] = fmt.Sprintf("%dMiB", rawLimit)
 	}
 
 	return out, nil

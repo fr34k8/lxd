@@ -134,7 +134,7 @@ func execPost(d *Daemon, r *http.Request) response.Response {
 	ws.uid = post.User
 	ws.gid = post.Group
 
-	resources := map[string][]string{}
+	resources := map[string][]api.URL{}
 
 	op, err := operations.OperationCreate(nil, "", operations.OperationClassWebsocket, operationtype.CommandExec, resources, ws.Metadata(), ws.Do, nil, ws.Connect, r)
 	if err != nil {
@@ -189,7 +189,7 @@ func (s *execWs) Connect(op *operations.Operation, r *http.Request, w http.Respo
 
 	for fd, fdSecret := range s.fds {
 		if secret == fdSecret {
-			conn, err := shared.WebsocketUpgrader.Upgrade(w, r, nil)
+			conn, err := ws.Upgrader.Upgrade(w, r, nil)
 			if err != nil {
 				return err
 			}
@@ -366,7 +366,7 @@ func (s *execWs) Do(op *operations.Operation) error {
 		return finisher(exitStatus, err)
 	}
 
-	l := logger.AddContext(logger.Log, logger.Ctx{"PID": cmd.Process.Pid, "interactive": s.interactive})
+	l := logger.AddContext(logger.Ctx{"PID": cmd.Process.Pid, "interactive": s.interactive})
 	l.Debug("Instance process started")
 
 	wgEOF.Add(1)

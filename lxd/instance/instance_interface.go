@@ -51,6 +51,12 @@ const TemplateTriggerCopy TemplateTrigger = "copy"
 // TemplateTriggerRename for when an instance is renamed.
 const TemplateTriggerRename TemplateTrigger = "rename"
 
+// PowerStateRunning represents the power state stored when an instance is running.
+const PowerStateRunning = "RUNNING"
+
+// PowerStateStopped represents the power state stored when an instance is stopped.
+const PowerStateStopped = "STOPPED"
+
 // ConfigReader is used to read instance config.
 type ConfigReader interface {
 	Project() api.Project
@@ -72,6 +78,7 @@ type Instance interface {
 	Start(stateful bool) error
 	Stop(stateful bool) error
 	Restart(timeout time.Duration) error
+	Rebuild(img *api.Image, op *operations.Operation) error
 	Unfreeze() error
 	RegisterDevices()
 
@@ -136,6 +143,7 @@ type Instance interface {
 
 	// Paths.
 	Path() string
+	ExecOutputPath() string
 	RootfsPath() string
 	TemplatesPath() string
 	StatePath() string

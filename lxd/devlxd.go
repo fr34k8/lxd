@@ -29,6 +29,7 @@ import (
 	"github.com/lxc/lxd/shared/api"
 	"github.com/lxc/lxd/shared/logger"
 	"github.com/lxc/lxd/shared/version"
+	"github.com/lxc/lxd/shared/ws"
 )
 
 type hoistFunc func(f func(*Daemon, instance.Instance, http.ResponseWriter, *http.Request) response.Response, d *Daemon) func(http.ResponseWriter, *http.Request)
@@ -139,7 +140,7 @@ var devlxdEventsGet = devLxdHandler{"/1.0/events", func(d *Daemon, c instance.In
 
 	// If the client has not requested a websocket connection then fallback to long polling event stream mode.
 	if r.Header.Get("Upgrade") == "websocket" {
-		conn, err := shared.WebsocketUpgrader.Upgrade(w, r, nil)
+		conn, err := ws.Upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return response.DevLxdErrorResponse(api.StatusErrorf(http.StatusInternalServerError, "internal server error"), c.Type() == instancetype.VM)
 		}
@@ -170,7 +171,7 @@ var devlxdEventsGet = devLxdHandler{"/1.0/events", func(d *Daemon, c instance.In
 		resp = response.DevLxdResponse(http.StatusOK, "", "raw", c.Type() == instancetype.VM)
 	}
 
-	listener, err := d.devlxdEvents.AddListener(c.ID(), listenerConnection, strings.Split(typeStr, ","))
+	listener, err := d.State().DevlxdEvents.AddListener(c.ID(), listenerConnection, strings.Split(typeStr, ","))
 	if err != nil {
 		return response.DevLxdErrorResponse(api.StatusErrorf(http.StatusInternalServerError, "internal server error"), c.Type() == instancetype.VM)
 	}
@@ -182,8 +183,10 @@ var devlxdEventsGet = devLxdHandler{"/1.0/events", func(d *Daemon, c instance.In
 }}
 
 var devlxdAPIHandler = devLxdHandler{"/1.0", func(d *Daemon, c instance.Instance, w http.ResponseWriter, r *http.Request) response.Response {
+	s := d.State()
+
 	if r.Method == "GET" {
-		clustered, err := cluster.Enabled(d.db.Node)
+		clustered, err := cluster.Enabled(s.DB.Node)
 		if err != nil {
 			return response.DevLxdErrorResponse(api.StatusErrorf(http.StatusInternalServerError, "internal server error"), c.Type() == instancetype.VM)
 		}
@@ -231,7 +234,7 @@ var devlxdAPIHandler = devLxdHandler{"/1.0", func(d *Daemon, c instance.Instance
 		}
 
 		if state == api.Ready {
-			d.events.SendLifecycle(c.Project().Name, lifecycle.InstanceReady.Event(c, nil))
+			s.Events.SendLifecycle(c.Project().Name, lifecycle.InstanceReady.Event(c, nil))
 		}
 
 		return response.DevLxdResponse(http.StatusOK, "", "raw", c.Type() == instancetype.VM)

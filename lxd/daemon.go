@@ -34,7 +34,7 @@ import (
 	clusterConfig "github.com/lxc/lxd/lxd/cluster/config"
 	"github.com/lxc/lxd/lxd/daemon"
 	"github.com/lxc/lxd/lxd/db"
-	clusterDB "github.com/lxc/lxd/lxd/db/cluster"
+	dbCluster "github.com/lxc/lxd/lxd/db/cluster"
 	"github.com/lxc/lxd/lxd/db/warningtype"
 	"github.com/lxc/lxd/lxd/dns"
 	"github.com/lxc/lxd/lxd/endpoints"
@@ -267,7 +267,7 @@ func (d *Daemon) checkTrustedClient(r *http.Request) error {
 }
 
 // getTrustedCertificates returns trusted certificates key on DB type and fingerprint.
-func (d *Daemon) getTrustedCertificates() map[clusterDB.CertificateType]map[string]x509.Certificate {
+func (d *Daemon) getTrustedCertificates() map[dbCluster.CertificateType]map[string]x509.Certificate {
 	d.clientCerts.Lock.Lock()
 	defer d.clientCerts.Lock.Unlock()
 
@@ -287,7 +287,7 @@ func (d *Daemon) Authenticate(w http.ResponseWriter, r *http.Request) (bool, str
 	// Allow internal cluster traffic by checking against the trusted certfificates.
 	if r.TLS != nil {
 		for _, i := range r.TLS.PeerCertificates {
-			trusted, fingerprint := util.CheckTrustState(*i, trustedCerts[clusterDB.CertificateTypeServer], d.endpoints.NetworkCert(), false)
+			trusted, fingerprint := util.CheckTrustState(*i, trustedCerts[dbCluster.CertificateTypeServer], d.endpoints.NetworkCert(), false)
 			if trusted {
 				return true, fingerprint, "cluster", nil
 			}
@@ -329,7 +329,7 @@ func (d *Daemon) Authenticate(w http.ResponseWriter, r *http.Request) (bool, str
 	}
 
 	if d.oidcVerifier != nil && d.oidcVerifier.IsRequest(r) {
-		userName, err := d.oidcVerifier.Auth(d.shutdownCtx, r)
+		userName, err := d.oidcVerifier.Auth(d.shutdownCtx, w, r)
 		if err != nil {
 			return false, "", "", err
 		}
@@ -356,7 +356,7 @@ func (d *Daemon) Authenticate(w http.ResponseWriter, r *http.Request) (bool, str
 	// Validate metrics certificates.
 	if r.URL.Path == "/1.0/metrics" {
 		for _, i := range r.TLS.PeerCertificates {
-			trusted, username := util.CheckTrustState(*i, trustedCerts[clusterDB.CertificateTypeMetrics], d.endpoints.NetworkCert(), trustCACertificates)
+			trusted, username := util.CheckTrustState(*i, trustedCerts[dbCluster.CertificateTypeMetrics], d.endpoints.NetworkCert(), trustCACertificates)
 			if trusted {
 				return true, username, "tls", nil
 			}
@@ -364,7 +364,7 @@ func (d *Daemon) Authenticate(w http.ResponseWriter, r *http.Request) (bool, str
 	}
 
 	for _, i := range r.TLS.PeerCertificates {
-		trusted, username := util.CheckTrustState(*i, trustedCerts[clusterDB.CertificateTypeClient], d.endpoints.NetworkCert(), trustCACertificates)
+		trusted, username := util.CheckTrustState(*i, trustedCerts[dbCluster.CertificateTypeClient], d.endpoints.NetworkCert(), trustCACertificates)
 		if trusted {
 			return true, username, "tls", nil
 		}
@@ -454,8 +454,19 @@ func (d *Daemon) createCmd(restAPI *mux.Router, version string, c APIEndpoint) {
 		// Authentication
 		trusted, username, protocol, err := d.Authenticate(w, r)
 		if err != nil {
+			_, ok := err.(*oidc.AuthError)
+			if ok {
+				// Ensure the OIDC headers are set if needed.
+				if d.oidcVerifier != nil {
+					_ = d.oidcVerifier.WriteHeaders(w)
+				}
+
+				_ = response.Unauthorized(err).Render(w)
+				return
+			}
+
 			// If not a macaroon discharge request, return the error
-			_, ok := err.(*bakery.DischargeRequiredError)
+			_, ok = err.(*bakery.DischargeRequiredError)
 			if !ok {
 				_ = response.InternalError(err).Render(w)
 				return
@@ -583,7 +594,7 @@ func (d *Daemon) createCmd(restAPI *mux.Router, version string, c APIEndpoint) {
 			}
 
 			r.Body = shared.BytesReadCloser{Buf: newBody}
-			util.DebugJSON("API Request", captured, logger.AddContext(logger.Log, logCtx))
+			util.DebugJSON("API Request", captured, logger.AddContext(logCtx))
 		}
 
 		// Actually process the request
@@ -750,7 +761,7 @@ func (d *Daemon) setupLoki(URL string, cert string, key string, caCert string, l
 }
 
 func (d *Daemon) init() error {
-	var dbWarnings []clusterDB.Warning
+	var dbWarnings []dbCluster.Warning
 
 	// Setup logger
 	events.LoggingServer = d.events
@@ -1009,7 +1020,7 @@ func (d *Daemon) init() error {
 	}
 
 	// Detect if clustered, but not yet upgraded to per-server client certificates.
-	if clustered && len(d.clientCerts.Certificates[clusterDB.CertificateTypeServer]) < 1 {
+	if clustered && len(d.clientCerts.Certificates[dbCluster.CertificateTypeServer]) < 1 {
 		// If the cluster has not yet upgraded to per-server client certificates (by running patch
 		// patchClusteringServerCertTrust) then temporarily use the network (cluster) certificate as client
 		// certificate, and cause us to trust it for use as client certificate from the other members.
@@ -1073,8 +1084,6 @@ func (d *Daemon) init() error {
 	localHTTPAddress := d.localConfig.HTTPSAddress()
 	localClusterAddress := d.localConfig.ClusterAddress()
 	debugAddress := d.localConfig.DebugAddress()
-	metricsAddress := d.localConfig.MetricsAddress()
-	storageBucketsAddress := d.localConfig.StorageBucketsAddress()
 
 	if os.Getenv("LISTEN_PID") != "" {
 		d.systemdSocketActivated = true
@@ -1082,21 +1091,19 @@ func (d *Daemon) init() error {
 
 	/* Setup the web server */
 	config := &endpoints.Config{
-		Dir:                   d.os.VarDir,
-		UnixSocket:            d.UnixSocket(),
-		Cert:                  networkCert,
-		RestServer:            restServer(d),
-		DevLxdServer:          devLxdServer(d),
-		LocalUnixSocketGroup:  d.config.Group,
-		NetworkAddress:        localHTTPAddress,
-		ClusterAddress:        localClusterAddress,
-		DebugAddress:          debugAddress,
-		MetricsAddress:        metricsAddress,
-		MetricsServer:         metricsServer(d),
-		StorageBucketsAddress: storageBucketsAddress,
-		StorageBucketsServer:  storageBucketsServer(d),
-		VsockServer:           vSockServer(d),
-		VsockSupport:          false,
+		Dir:                  d.os.VarDir,
+		UnixSocket:           d.UnixSocket(),
+		Cert:                 networkCert,
+		RestServer:           restServer(d),
+		DevLxdServer:         devLxdServer(d),
+		LocalUnixSocketGroup: d.config.Group,
+		NetworkAddress:       localHTTPAddress,
+		ClusterAddress:       localClusterAddress,
+		DebugAddress:         debugAddress,
+		MetricsServer:        metricsServer(d),
+		StorageBucketsServer: storageBucketsServer(d),
+		VsockServer:          vSockServer(d),
+		VsockSupport:         false,
 	}
 
 	// Enable vsock server support if VM instances supported.
@@ -1265,7 +1272,7 @@ func (d *Daemon) init() error {
 	maasAPIKey := ""
 	maasMachine := d.localConfig.MAASMachine()
 
-	err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+	err = d.db.Cluster.Transaction(d.shutdownCtx, func(ctx context.Context, tx *db.ClusterTx) error {
 		config, err := clusterConfig.Load(ctx, tx)
 		if err != nil {
 			return err
@@ -1281,6 +1288,7 @@ func (d *Daemon) init() error {
 		d.serverName = serverName
 		d.globalConfig = config
 		d.globalConfigMu.Unlock()
+
 		return nil
 	})
 	if err != nil {
@@ -1331,10 +1339,7 @@ func (d *Daemon) init() error {
 
 	// Setup OIDC authentication.
 	if oidcIssuer != "" && oidcClientID != "" {
-		d.oidcVerifier, err = oidc.NewVerifier(oidcIssuer, oidcClientID, oidcAudience)
-		if err != nil {
-			return err
-		}
+		d.oidcVerifier = oidc.NewVerifier(oidcIssuer, oidcClientID, oidcAudience)
 	}
 
 	// Setup BGP listener.
@@ -1400,6 +1405,23 @@ func (d *Daemon) init() error {
 		return err
 	}
 
+	// Setup tertiary listeners that may use managed network addresses and must be started after networks.
+	metricsAddress := d.localConfig.MetricsAddress()
+	if metricsAddress != "" {
+		err = d.endpoints.UpMetrics(metricsAddress)
+		if err != nil {
+			return err
+		}
+	}
+
+	storageBucketsAddress := d.localConfig.StorageBucketsAddress()
+	if storageBucketsAddress != "" {
+		err = d.endpoints.UpStorageBuckets(storageBucketsAddress)
+		if err != nil {
+			return err
+		}
+	}
+
 	// Load instance placement scriptlet.
 	if instancePlacementScriptlet != "" {
 		err = scriptletLoad.InstancePlacementSet(instancePlacementScriptlet)
@@ -1415,13 +1437,13 @@ func (d *Daemon) init() error {
 	}
 
 	// Cleanup leftover images.
-	pruneLeftoverImages(d)
+	pruneLeftoverImages(d.State())
 
 	var instances []instance.Instance
 
 	if !d.os.MockMode {
 		// Start the scheduler
-		go deviceEventListener(d.State())
+		go deviceEventListener(d.State)
 
 		prefixPath := os.Getenv("LXD_DEVMONITOR_DIR")
 		if prefixPath == "" {
@@ -1541,14 +1563,11 @@ func (d *Daemon) init() error {
 		// Remove expired container backups (hourly)
 		d.tasks.Add(pruneExpiredContainerBackupsTask(d))
 
-		// Take snapshot of instances and remove expired ones (minutely check of configurable cron expression)
-		d.tasks.Add(autoCreateAndPruneExpiredInstanceSnapshotsTask(d))
+		// Prune expired instance snapshots and take snapshot of instances (minutely check of configurable cron expression)
+		d.tasks.Add(pruneExpiredAndAutoCreateInstanceSnapshotsTask(d))
 
-		// Remove expired custom volume snapshots (minutely)
-		d.tasks.Add(pruneExpireCustomVolumeSnapshotsTask(d))
-
-		// Take snapshot of custom volumes (minutely check of configurable cron expression)
-		d.tasks.Add(autoCreateCustomVolumeSnapshotsTask(d))
+		// Prune expired custom volume snapshots and take snapshots of custom volumes (minutely check of configurable cron expression)
+		d.tasks.Add(pruneExpiredAndAutoCreateCustomVolumeSnapshotsTask(d))
 
 		// Remove resolved warnings (daily)
 		d.tasks.Add(pruneResolvedWarningsTask(d))
@@ -1627,7 +1646,7 @@ func (d *Daemon) Stop(ctx context.Context, sig os.Signal) error {
 	if d.gateway != nil {
 		d.stopClusterTasks()
 
-		err := handoverMemberRole(d)
+		err := handoverMemberRole(d.State(), d.gateway)
 		if err != nil {
 			logger.Warn("Could not handover member's responsibilities", logger.Ctx{"err": err})
 			d.gateway.Kill()
@@ -1807,7 +1826,7 @@ func (d *Daemon) setupRBACServer(rbacURL string, rbacKey string, rbacExpiry int6
 		var result map[int64]string
 		err := d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 			var err error
-			result, err = clusterDB.GetProjectIDsToNames(ctx, tx.Tx())
+			result, err = dbCluster.GetProjectIDsToNames(ctx, tx.Tx())
 			return err
 		})
 
@@ -2121,7 +2140,7 @@ func (d *Daemon) nodeRefreshTask(heartbeatData *cluster.APIHeartbeat, isLeader b
 		if isDegraded || onlineVoters < int(maxVoters) || onlineStandbys < int(maxStandBy) {
 			d.clusterMembershipMutex.Lock()
 			logger.Debug("Rebalancing member roles in heartbeat", logger.Ctx{"local": localClusterAddress})
-			err := rebalanceMemberRoles(d, nil, unavailableMembers)
+			err := rebalanceMemberRoles(d.State(), d.gateway, nil, unavailableMembers)
 			if err != nil && !errors.Is(err, cluster.ErrNotLeader) {
 				logger.Warn("Could not rebalance cluster member roles", logger.Ctx{"err": err, "local": localClusterAddress})
 			}
@@ -2132,7 +2151,7 @@ func (d *Daemon) nodeRefreshTask(heartbeatData *cluster.APIHeartbeat, isLeader b
 		if hasNodesNotPartOfRaft {
 			d.clusterMembershipMutex.Lock()
 			logger.Debug("Upgrading members without raft role in heartbeat", logger.Ctx{"local": localClusterAddress})
-			err := upgradeNodesWithoutRaftRole(d)
+			err := upgradeNodesWithoutRaftRole(d.State(), d.gateway)
 			if err != nil && !errors.Is(err, cluster.ErrNotLeader) {
 				logger.Warn("Failed upgrading raft roles:", logger.Ctx{"err": err, "local": localClusterAddress})
 			}

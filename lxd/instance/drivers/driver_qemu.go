@@ -55,6 +55,7 @@ import (
 	"github.com/lxc/lxd/lxd/metrics"
 	"github.com/lxc/lxd/lxd/migration"
 	"github.com/lxc/lxd/lxd/network"
+	"github.com/lxc/lxd/lxd/operations"
 	"github.com/lxc/lxd/lxd/project"
 	"github.com/lxc/lxd/lxd/resources"
 	"github.com/lxc/lxd/lxd/response"
@@ -101,6 +102,32 @@ const qemuBlockDevIDPrefix = "lxd_"
 // qemuMigrationNBDExportName is the name of the disk device export by the migration NBD server.
 const qemuMigrationNBDExportName = "lxd_root"
 
+// OVMF firmwares.
+type ovmfFirmware struct {
+	code string
+	vars string
+}
+
+var ovmfGenericFirmwares = []ovmfFirmware{
+	{code: "OVMF_CODE.4MB.fd", vars: "OVMF_VARS.4MB.fd"},
+	{code: "OVMF_CODE.2MB.fd", vars: "OVMF_VARS.2MB.fd"},
+	{code: "OVMF_CODE.fd", vars: "OVMF_VARS.fd"},
+	{code: "OVMF_CODE.fd", vars: "qemu.nvram"},
+}
+
+var ovmfSecurebootFirmwares = []ovmfFirmware{
+	{code: "OVMF_CODE.4MB.fd", vars: "OVMF_VARS.4MB.ms.fd"},
+	{code: "OVMF_CODE.2MB.fd", vars: "OVMF_VARS.2MB.ms.fd"},
+	{code: "OVMF_CODE.fd", vars: "OVMF_VARS.ms.fd"},
+	{code: "OVMF_CODE.fd", vars: "qemu.nvram"},
+}
+
+var ovmfCSMFirmwares = []ovmfFirmware{
+	{code: "OVMF_CODE.4MB.CSM.fd", vars: "OVMF_VARS.4MB.CSM.fd"},
+	{code: "OVMF_CODE.2MB.CSM.fd", vars: "OVMF_VARS.2MB.CSM.fd"},
+	{code: "OVMF_CODE.CSM.fd", vars: "OVMF_VARS.CSM.fd"},
+}
+
 // qemuSparseUSBPorts is the amount of sparse USB ports for VMs.
 // 4 are reserved, and the other 4 can be used for any USB device.
 const qemuSparseUSBPorts = 8
@@ -141,7 +168,7 @@ func qemuInstantiate(s *state.State, args db.InstanceArgs, expandedDevices devic
 			lastUsedDate: args.LastUsedDate,
 			localConfig:  args.Config,
 			localDevices: args.Devices,
-			logger:       logger.AddContext(logger.Log, logger.Ctx{"instanceType": args.Type, "instance": args.Name, "project": args.Project}),
+			logger:       logger.AddContext(logger.Ctx{"instanceType": args.Type, "instance": args.Name, "project": args.Project}),
 			name:         args.Name,
 			node:         args.Node,
 			profiles:     args.Profiles,
@@ -199,7 +226,7 @@ func qemuCreate(s *state.State, args db.InstanceArgs, p api.Project) (instance.I
 			lastUsedDate: args.LastUsedDate,
 			localConfig:  args.Config,
 			localDevices: args.Devices,
-			logger:       logger.AddContext(logger.Log, logger.Ctx{"instanceType": args.Type, "instance": args.Name, "project": args.Project}),
+			logger:       logger.AddContext(logger.Ctx{"instanceType": args.Type, "instance": args.Name, "project": args.Project}),
 			name:         args.Name,
 			node:         args.Node,
 			profiles:     args.Profiles,
@@ -348,16 +375,10 @@ func (d *qemu) getAgentClient() (*http.Client, error) {
 		return nil, err
 	}
 
-	vsockID := d.vsockID() // Default to using the vsock ID that will be used on next start.
-
-	// But if vsock ID from last VM start is present in volatile, then use that.
-	// This allows a running VM to be recovered after DB record deletion and that agent connection still work
-	// after the VM's instance ID has changed.
-	if d.localConfig["volatile.vsock_id"] != "" {
-		volatileVsockID, err := strconv.Atoi(d.localConfig["volatile.vsock_id"])
-		if err == nil {
-			vsockID = volatileVsockID
-		}
+	// Existing vsock ID from volatile.
+	vsockID, err := d.getVsockID()
+	if err != nil {
+		return nil, err
 	}
 
 	agent, err := lxdvsock.HTTPClient(vsockID, shared.HTTPSDefaultPort, clientCert, clientKey, agentCert)
@@ -376,7 +397,7 @@ func (d *qemu) getMonitorEventHandler() func(event string, data map[string]any) 
 	state := d.state
 
 	return func(event string, data map[string]any) {
-		if !shared.StringInSlice(event, []string{"SHUTDOWN", "RESET", qmp.AgentStatusStarted}) {
+		if !shared.StringInSlice(event, []string{qmp.EventVMShutdown, qmp.EventAgentStarted}) {
 			return // Don't bother loading the instance from DB if we aren't going to handle the event.
 		}
 
@@ -387,7 +408,7 @@ func (d *qemu) getMonitorEventHandler() func(event string, data map[string]any) 
 		if inst == nil {
 			inst, err = instance.LoadByProjectAndName(state, instProject.Name, instanceName)
 			if err != nil {
-				l := logger.AddContext(logger.Log, logger.Ctx{"project": instProject.Name, "instance": instanceName})
+				l := logger.AddContext(logger.Ctx{"project": instProject.Name, "instance": instanceName})
 				// If DB not available, try loading from backup file.
 				l.Warn("Failed loading instance from database to handle monitor event, trying backup file", logger.Ctx{"err": err})
 
@@ -402,21 +423,25 @@ func (d *qemu) getMonitorEventHandler() func(event string, data map[string]any) 
 
 		d = inst.(*qemu)
 
-		if event == qmp.AgentStatusStarted {
+		if event == qmp.EventAgentStarted {
 			d.logger.Debug("Instance agent started")
 			err := d.advertiseVsockAddress()
 			if err != nil {
 				d.logger.Warn("Failed to advertise vsock address to instance agent", logger.Ctx{"err": err})
 				return
 			}
-		} else if event == "SHUTDOWN" {
+		} else if event == qmp.EventVMShutdown {
 			target := "stop"
 			entry, ok := data["reason"]
 			if ok && entry == "guest-reset" {
 				target = "reboot"
 			}
 
-			d.logger.Debug("Instance stopped", logger.Ctx{"target": target, "reason": data["reason"]})
+			if entry == qmp.EventVMShutdownReasonDisconnect {
+				d.logger.Warn("Instance stopped", logger.Ctx{"target": target, "reason": data["reason"]})
+			} else {
+				d.logger.Debug("Instance stopped", logger.Ctx{"target": target, "reason": data["reason"]})
+			}
 
 			err = d.onStop(target)
 			if err != nil {
@@ -549,7 +574,7 @@ func (d *qemu) configVirtiofsdPaths() (string, string) {
 // pidWait waits for the QEMU process to exit. Does this in a way that doesn't require the LXD process to be a
 // parent of the QEMU process (in order to allow for LXD to be restarted after the VM was started).
 // Returns true if process stopped, false if timeout was exceeded.
-func (d *qemu) pidWait(timeout time.Duration, op *operationlock.InstanceOperation) bool {
+func (d *qemu) pidWait(timeout time.Duration) bool {
 	waitUntil := time.Now().Add(timeout)
 	for {
 		pid, _ := d.pid()
@@ -559,10 +584,6 @@ func (d *qemu) pidWait(timeout time.Duration, op *operationlock.InstanceOperatio
 
 		if time.Now().After(waitUntil) {
 			return false
-		}
-
-		if op != nil {
-			_ = op.Reset() // Reset timeout to default.
 		}
 
 		time.Sleep(time.Millisecond * time.Duration(250))
@@ -586,21 +607,19 @@ func (d *qemu) onStop(target string) error {
 	defer op.Done(nil)
 
 	// Wait for QEMU process to end (to avoiding racing start when restarting).
-	// Wait up to operationlock.TimeoutShutdown to allow for flushing any pending data to disk.
+	// Wait up to 5 minutes to allow for flushing any pending data to disk.
 	d.logger.Debug("Waiting for VM process to finish")
-	waitTimeout := operationlock.TimeoutShutdown
-	if d.pidWait(waitTimeout, op) {
+	waitTimeout := time.Minute * 5
+	if d.pidWait(waitTimeout) {
 		d.logger.Debug("VM process finished")
 	} else {
 		// Log a warning, but continue clean up as best we can.
 		d.logger.Error("VM process failed to stop", logger.Ctx{"timeout": waitTimeout})
 	}
 
-	_ = op.Reset() // Reset timeout to default.
-
 	// Record power state.
 	err = d.VolatileSet(map[string]string{
-		"volatile.last_state.power": "STOPPED",
+		"volatile.last_state.power": instance.PowerStateStopped,
 		"volatile.last_state.ready": "false",
 	})
 	if err != nil {
@@ -614,7 +633,6 @@ func (d *qemu) onStop(target string) error {
 	_ = os.Remove(d.monitorPath())
 
 	// Stop the storage for the instance.
-	_ = op.ResetTimeout(waitTimeout)
 	err = d.unmount()
 	if err != nil && !errors.Is(err, storageDrivers.ErrInUse) {
 		err = fmt.Errorf("Failed unmounting instance: %w", err)
@@ -632,12 +650,12 @@ func (d *qemu) onStop(target string) error {
 	// Log and emit lifecycle if not user triggered.
 	if op.GetInstanceInitiated() {
 		d.state.Events.SendLifecycle(d.project.Name, lifecycle.InstanceShutdown.Event(d, nil))
+	} else {
+		d.state.Events.SendLifecycle(d.project.Name, lifecycle.InstanceStopped.Event(d, nil))
 	}
 
 	// Reboot the instance.
 	if target == "reboot" {
-		_ = op.Reset() // Reset timeout to default.
-
 		err = d.Start(false)
 		if err != nil {
 			op.Done(err)
@@ -646,8 +664,6 @@ func (d *qemu) onStop(target string) error {
 
 		d.state.Events.SendLifecycle(d.project.Name, lifecycle.InstanceRestarted.Event(d, nil))
 	} else if d.ephemeral {
-		_ = op.Reset() // Reset timeout to default.
-
 		// Destroy ephemeral virtual machines.
 		err = d.delete(true)
 		if err != nil {
@@ -704,6 +720,10 @@ func (d *qemu) Shutdown(timeout time.Duration) error {
 		return err
 	}
 
+	// Indicate to the onStop hook that if the VM stops it was due to a clean shutdown because the VM responded
+	// to the powerdown request.
+	op.SetInstanceInitiated(true)
+
 	// Send the system_powerdown command.
 	err = monitor.Powerdown()
 	if err != nil {
@@ -718,21 +738,13 @@ func (d *qemu) Shutdown(timeout time.Duration) error {
 
 	d.logger.Debug("Shutdown request sent to instance")
 
-	// Use default operation timeout if not specified (negatively or positively).
-	if timeout == 0 {
-		timeout = operationlock.TimeoutDefault
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 
-	// Extend operation lock for the requested timeout.
-	err = op.ResetTimeout(timeout)
-	if err != nil {
-		return err
-	}
-
-	// Wait for operation lock to be Done. This is normally completed by onStop which picks up the same
-	// operation lock and then marks it as Done after the instance stops and the devices have been cleaned up.
-	// However if the operation has failed for another reason we will collect the error here.
-	err = op.Wait()
+	// Wait for operation lock to be Done or context to timeout. The operation lock is normally completed by
+	// onStop which picks up the same lock and then marks it as Done after the instance stops and the devices
+	// have been cleaned up. However if the operation has failed for another reason we collect the error here.
+	err = op.Wait(ctx)
 	status := d.statusCode()
 	if status != api.Stopped {
 		errPrefix := fmt.Errorf("Failed shutting down instance, status is %q", status)
@@ -742,9 +754,6 @@ func (d *qemu) Shutdown(timeout time.Duration) error {
 		}
 
 		return errPrefix
-	} else if op.Action() == "stop" {
-		// If instance stopped, send lifecycle event (even if there has been an error cleaning up).
-		d.state.Events.SendLifecycle(d.project.Name, lifecycle.InstanceShutdown.Event(d, nil))
 	}
 
 	// Now handle errors from shutdown sequence and return to caller if wasn't completed cleanly.
@@ -757,14 +766,12 @@ func (d *qemu) Shutdown(timeout time.Duration) error {
 
 // Restart restart the instance.
 func (d *qemu) Restart(timeout time.Duration) error {
-	err := d.restartCommon(d, timeout)
-	if err != nil {
-		return err
-	}
+	return d.restartCommon(d, timeout)
+}
 
-	d.state.Events.SendLifecycle(d.project.Name, lifecycle.InstanceRestarted.Event(d, nil))
-
-	return nil
+// Rebuild rebuilds the instance using the supplied image fingerprint as source.
+func (d *qemu) Rebuild(img *api.Image, op *operations.Operation) error {
+	return d.rebuildCommon(d, img, op)
 }
 
 func (d *qemu) ovmfPath() string {
@@ -800,7 +807,11 @@ func (d *qemu) killQemuProcess(pid int) error {
 	// the parent of the process, and we have still sent the kill signal as per the function's description.
 	_, err = proc.Wait()
 	if err != nil {
-		d.logger.Warn("Failed to collect VM process exit status", logger.Ctx{"pid": pid})
+		if strings.Contains(err.Error(), "no child processes") {
+			return nil
+		}
+
+		d.logger.Warn("Failed to collect VM process exit status", logger.Ctx{"pid": pid, "err": err})
 	}
 
 	return nil
@@ -823,9 +834,6 @@ func (d *qemu) restoreStateHandle(ctx context.Context, monitor *qmp.Monitor, f *
 
 // restoreState restores VM state from state file or from migration source if d.migrationReceiveStateful set.
 func (d *qemu) restoreState(monitor *qmp.Monitor) error {
-	stateCtx, stateCtxDone := context.WithCancel(context.Background())
-	defer stateCtxDone()
-
 	if d.migrationReceiveStateful != nil {
 		stateConn := d.migrationReceiveStateful[api.SecretNameState]
 		if stateConn == nil {
@@ -873,17 +881,17 @@ func (d *qemu) restoreState(monitor *qmp.Monitor) error {
 			return err
 		}
 
-		defer func() {
+		go func() {
+			_, err := io.Copy(pipeWrite, stateConn)
+			if err != nil {
+				d.logger.Warn("Failed reading from state connection", logger.Ctx{"err": err})
+			}
+
 			_ = pipeRead.Close()
 			_ = pipeWrite.Close()
 		}()
 
-		go func() {
-			_, _ = io.Copy(pipeWrite, stateConn)
-			stateCtxDone()
-		}()
-
-		err = d.restoreStateHandle(stateCtx, monitor, pipeRead)
+		err = d.restoreStateHandle(context.Background(), monitor, pipeRead)
 		if err != nil {
 			return fmt.Errorf("Failed restoring checkpoint from source: %w", err)
 		}
@@ -913,17 +921,17 @@ func (d *qemu) restoreState(monitor *qmp.Monitor) error {
 			return err
 		}
 
-		defer func() {
+		go func() {
+			_, err := io.Copy(pipeWrite, uncompressedState)
+			if err != nil {
+				d.logger.Warn("Failed reading from state file", logger.Ctx{"path": statePath, "err": err})
+			}
+
 			_ = pipeRead.Close()
 			_ = pipeWrite.Close()
 		}()
 
-		go func() {
-			_, _ = io.Copy(pipeWrite, uncompressedState)
-			stateCtxDone()
-		}()
-
-		err = d.restoreStateHandle(stateCtx, monitor, pipeRead)
+		err = d.restoreStateHandle(context.Background(), monitor, pipeRead)
 		if err != nil {
 			return fmt.Errorf("Failed restoring state from %q: %w", stateFile.Name(), err)
 		}
@@ -1076,6 +1084,11 @@ func (d *qemu) start(stateful bool, op *operationlock.InstanceOperation) error {
 		return fmt.Errorf("The image used by this instance is incompatible with secureboot. Please set security.secureboot=false on the instance")
 	}
 
+	// Ensure secureboot is turned off when CSM is on
+	if shared.IsTrue(d.expandedConfig["security.csm"]) && shared.IsTrueOrEmpty(d.expandedConfig["security.secureboot"]) {
+		return fmt.Errorf("Secure boot can't be enabled while CSM is turned on. Please set security.secureboot=false on the instance")
+	}
+
 	// Setup a new operation if needed.
 	if op == nil {
 		op, err = operationlock.CreateWaitGet(d.Project().Name, d.Name(), operationlock.ActionStart, []operationlock.Action{operationlock.ActionRestart, operationlock.ActionRestore}, false, false)
@@ -1132,9 +1145,15 @@ func (d *qemu) start(stateful bool, op *operationlock.InstanceOperation) error {
 
 	volatileSet := make(map[string]string)
 
+	// New or existing vsock ID from volatile.
+	vsockID, err := d.nextVsockID()
+	if err != nil {
+		return err
+	}
+
 	// Update vsock ID in volatile if needed for recovery (do this before UpdateBackupFile() call).
 	oldVsockID := d.localConfig["volatile.vsock_id"]
-	newVsockID := strconv.Itoa(d.vsockID())
+	newVsockID := strconv.FormatUint(uint64(vsockID), 10)
 	if oldVsockID != newVsockID {
 		volatileSet["volatile.vsock_id"] = newVsockID
 	}
@@ -1556,8 +1575,6 @@ func (d *qemu) start(stateful bool, op *operationlock.InstanceOperation) error {
 		return err
 	}
 
-	_ = op.Reset() // Reset timeout to default.
-
 	err = p.StartWithFiles(context.Background(), fdFiles)
 	if err != nil {
 		op.Done(err)
@@ -1589,6 +1606,10 @@ func (d *qemu) start(stateful bool, op *operationlock.InstanceOperation) error {
 		op.Done(err)
 		return err
 	}
+
+	// Don't allow the monitor to trigger a disconnection shutdown event until cleanly started so that the
+	// onStop hook isn't triggered prematurely (as this function's reverter will clean up on failure to start).
+	monitor.SetOnDisconnectEvent(false)
 
 	// Get the list of PIDs from the VM.
 	pids, err := monitor.GetCPUs()
@@ -1659,13 +1680,17 @@ func (d *qemu) start(stateful bool, op *operationlock.InstanceOperation) error {
 	// This ensures that if the guest initiates a reboot that the SHUTDOWN event is generated instead with the
 	// reason set to "guest-reset" so that the event handler returned from getMonitorEventHandler() can restart
 	// the guest instead.
-	err = monitor.SetAction(map[string]string{"reboot": "shutdown"})
+	actions := map[string]string{
+		"shutdown": "poweroff",
+		"reboot":   "shutdown", // Don't reset on reboot. Let LXD handle reboots.
+		"panic":    "pause",    // Pause on panics to allow investigation.
+	}
+
+	err = monitor.SetAction(actions)
 	if err != nil {
 		op.Done(err)
 		return fmt.Errorf("Failed setting reboot action: %w", err)
 	}
-
-	_ = op.Reset() // Reset timeout to default.
 
 	// Restore the state.
 	if stateful {
@@ -1720,6 +1745,9 @@ func (d *qemu) start(stateful bool, op *operationlock.InstanceOperation) error {
 		d.state.Events.SendLifecycle(d.project.Name, lifecycle.InstanceStarted.Event(d, nil))
 	}
 
+	// The VM started cleanly so now enable the unexpected disconnection event to ensure the onStop hook is
+	// run if QMP unexpectedly disconnects.
+	monitor.SetOnDisconnectEvent(true)
 	op.Done(nil)
 	return nil
 }
@@ -1827,7 +1855,7 @@ func (d *qemu) getAgentConnectionInfo() (*agentAPI.API10Put, error) {
 	req := agentAPI.API10Put{
 		Certificate: string(d.state.Endpoints.NetworkCert().PublicKey()),
 		Devlxd:      shared.IsTrueOrEmpty(d.expandedConfig["security.devlxd"]),
-		CID:         vsockaddr.ContextID,
+		CID:         vsock.Host, // Always tell lxd-agent to connect to LXD using Host Context ID to support nesting.
 		Port:        vsockaddr.Port,
 	}
 
@@ -1895,30 +1923,59 @@ func (d *qemu) setupNvram() error {
 
 	defer func() { _ = d.unmount() }()
 
-	srcOvmfFile := filepath.Join(d.ovmfPath(), "OVMF_VARS.fd")
-	if shared.IsTrueOrEmpty(d.expandedConfig["security.secureboot"]) {
-		srcOvmfFile = filepath.Join(d.ovmfPath(), "OVMF_VARS.ms.fd")
+	// Cleanup existing variables.
+	for _, firmwares := range [][]ovmfFirmware{ovmfGenericFirmwares, ovmfSecurebootFirmwares, ovmfCSMFirmwares} {
+		for _, firmware := range firmwares {
+			err := os.Remove(filepath.Join(d.Path(), firmware.vars))
+			if err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
 	}
 
-	missingEFIFirmwareErr := fmt.Errorf("Required EFI firmware settings file missing %q", srcOvmfFile)
-
-	if !shared.PathExists(srcOvmfFile) {
-		return missingEFIFirmwareErr
+	// Determine expected firmware.
+	firmwares := ovmfGenericFirmwares
+	if shared.IsTrue(d.expandedConfig["security.csm"]) {
+		firmwares = ovmfCSMFirmwares
+	} else if shared.IsTrueOrEmpty(d.expandedConfig["security.secureboot"]) {
+		firmwares = ovmfSecurebootFirmwares
 	}
 
-	srcOvmfFile, err = filepath.EvalSymlinks(srcOvmfFile)
-	if err != nil {
-		return fmt.Errorf("Failed resolving EFI firmware symlink %q: %w", srcOvmfFile, err)
+	// Find the template file.
+	var ovmfVarsPath string
+	var ovmfVarsName string
+	for _, firmware := range firmwares {
+		varsPath := filepath.Join(d.ovmfPath(), firmware.vars)
+		varsPath, err = filepath.EvalSymlinks(varsPath)
+		if err != nil {
+			continue
+		}
+
+		if shared.PathExists(varsPath) {
+			ovmfVarsPath = varsPath
+			ovmfVarsName = firmware.vars
+			break
+		}
 	}
 
-	if !shared.PathExists(srcOvmfFile) {
-		return missingEFIFirmwareErr
+	if ovmfVarsPath == "" {
+		return fmt.Errorf("Couldn't find one of the required UEFI firmware files: %+v", firmwares)
 	}
 
-	_ = os.Remove(d.nvramPath())
-	err = shared.FileCopy(srcOvmfFile, d.nvramPath())
+	// Copy the template.
+	err = shared.FileCopy(ovmfVarsPath, filepath.Join(d.Path(), ovmfVarsName))
 	if err != nil {
 		return err
+	}
+
+	// Generate a symlink if needed.
+	// This is so qemu.nvram can always be assumed to be the OVMF vars file.
+	// The real file name is then used to determine what firmware must be selected.
+	if !shared.PathExists(d.nvramPath()) {
+		err = os.Symlink(ovmfVarsName, d.nvramPath())
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -2802,8 +2859,28 @@ func (d *qemu) generateQemuConfigFile(cpuInfo *cpuTopology, mountInfo *storagePo
 			return "", nil, fmt.Errorf("Failed opening NVRAM file: %w", err)
 		}
 
+		// Determine expected firmware.
+		firmwares := ovmfGenericFirmwares
+		if shared.IsTrue(d.expandedConfig["security.csm"]) {
+			firmwares = ovmfCSMFirmwares
+		} else if shared.IsTrueOrEmpty(d.expandedConfig["security.secureboot"]) {
+			firmwares = ovmfSecurebootFirmwares
+		}
+
+		var ovmfCode string
+		for _, firmware := range firmwares {
+			if shared.PathExists(filepath.Join(d.Path(), firmware.vars)) {
+				ovmfCode = firmware.code
+				break
+			}
+		}
+
+		if ovmfCode == "" {
+			return "", nil, fmt.Errorf("Unable to locate matching firmware: %+v", firmwares)
+		}
+
 		driveFirmwareOpts := qemuDriveFirmwareOpts{
-			roPath:    filepath.Join(d.ovmfPath(), "OVMF_CODE.fd"),
+			roPath:    filepath.Join(d.ovmfPath(), ovmfCode),
 			nvramPath: fmt.Sprintf("/dev/fd/%d", d.addFileDescriptor(fdFiles, nvRAMFile)),
 		}
 
@@ -2866,6 +2943,12 @@ func (d *qemu) generateQemuConfigFile(cpuInfo *cpuTopology, mountInfo *storagePo
 
 	cfg = append(cfg, qemuTablet(&tabletOpts)...)
 
+	// Existing vsock ID from volatile.
+	vsockID, err := d.getVsockID()
+	if err != nil {
+		return "", nil, err
+	}
+
 	devBus, devAddr, multi = bus.allocate(busFunctionGroupGeneric)
 	vsockOpts := qemuVsockOpts{
 		dev: qemuDevOpts{
@@ -2874,7 +2957,7 @@ func (d *qemu) generateQemuConfigFile(cpuInfo *cpuTopology, mountInfo *storagePo
 			devAddr:       devAddr,
 			multifunction: multi,
 		},
-		vsockID: d.vsockID(),
+		vsockID: vsockID,
 	}
 
 	cfg = append(cfg, qemuVsock(&vsockOpts)...)
@@ -2906,7 +2989,16 @@ func (d *qemu) generateQemuConfigFile(cpuInfo *cpuTopology, mountInfo *storagePo
 		cfg = append(cfg, qemuUSB(&usbOpts)...)
 	}
 
-	devBus, devAddr, multi = bus.allocate(busFunctionGroupNone)
+	if shared.IsTrue(d.expandedConfig["security.csm"]) {
+		// Allocate a regular entry to keep things aligned normally (avoid NICs getting a different name).
+		_, _, _ = bus.allocate(busFunctionGroupNone)
+
+		// Allocate a direct entry so the SCSI controller can be seen by seabios.
+		devBus, devAddr, multi = bus.allocateDirect()
+	} else {
+		devBus, devAddr, multi = bus.allocate(busFunctionGroupNone)
+	}
+
 	scsiOpts := qemuDevOpts{
 		busName:       bus.name,
 		devBus:        devBus,
@@ -2971,7 +3063,16 @@ func (d *qemu) generateQemuConfigFile(cpuInfo *cpuTopology, mountInfo *storagePo
 		cfg = append(cfg, qemuDriveConfig(&driveConfigVirtioOpts)...)
 	}
 
-	devBus, devAddr, multi = bus.allocate(busFunctionGroupNone)
+	if shared.IsTrue(d.expandedConfig["security.csm"]) {
+		// Allocate a regular entry to keep things aligned normally (avoid NICs getting a different name).
+		_, _, _ = bus.allocate(busFunctionGroupNone)
+
+		// Allocate a direct entry so the GPU can be seen by seabios.
+		devBus, devAddr, multi = bus.allocateDirect()
+	} else {
+		devBus, devAddr, multi = bus.allocate(busFunctionGroupNone)
+	}
+
 	gpuOpts := qemuGpuOpts{
 		dev: qemuDevOpts{
 			busName:       bus.name,
@@ -3436,24 +3537,31 @@ func (d *qemu) addDriveConfig(bootIndexes map[string]int, driveConf deviceConfig
 			// If backing FS is ZFS or BTRFS, avoid using direct I/O and use host page cache only.
 			// We've seen ZFS lock up and BTRFS checksum issues when using direct I/O on image files.
 			if fsType == "zfs" || fsType == "btrfs" {
-				if driveConf.FSType != "iso9660" {
-					// Only warn about using writeback cache if the drive image is writable.
-					d.logger.Warn("Using writeback cache I/O", logger.Ctx{"device": driveConf.DevName, "devPath": srcDevPath, "fsType": fsType})
-				}
-
 				aioMode = "threads"
 				cacheMode = "writeback" // Use host cache, with neither O_DSYNC nor O_DIRECT semantics.
+			} else {
+				// Use host cache, with neither O_DSYNC nor O_DIRECT semantics if filesystem
+				// doesn't support Direct I/O.
+				_, err := os.OpenFile(srcDevPath, unix.O_DIRECT|unix.O_RDONLY, 0)
+				if err != nil {
+					cacheMode = "writeback"
+				}
 			}
 
-			// Special case ISO images as cdroms.
-			if strings.HasSuffix(srcDevPath, ".iso") {
-				media = "cdrom"
+			if cacheMode == "writeback" && driveConf.FSType != "iso9660" {
+				// Only warn about using writeback cache if the drive image is writable.
+				d.logger.Warn("Using writeback cache I/O", logger.Ctx{"device": driveConf.DevName, "devPath": srcDevPath, "fsType": fsType})
 			}
 		} else if !shared.StringInSlice(device.DiskDirectIO, driveConf.Opts) {
 			// If drive config indicates we need to use unsafe I/O then use it.
 			d.logger.Warn("Using unsafe cache I/O", logger.Ctx{"device": driveConf.DevName, "devPath": srcDevPath})
 			aioMode = "threads"
 			cacheMode = "unsafe" // Use host cache, but ignore all sync requests from guest.
+		}
+
+		// Special case ISO images as cdroms.
+		if driveConf.FSType == "iso9660" {
+			media = "cdrom"
 		}
 	}
 
@@ -3729,6 +3837,97 @@ func (d *qemu) addNetDevConfig(busName string, qemuDev map[string]string, bootIn
 		return queueCount
 	}
 
+	// tapMonHook is a helper function used as the monitor hook for macvtap and tap interfaces to open
+	// multi-queue file handles to both the interface device and the vhost-net device and pass them to QEMU.
+	tapMonHook := func(deviceFile func() (*os.File, error)) func(m *qmp.Monitor) error {
+		return func(m *qmp.Monitor) error {
+			reverter := revert.New()
+			defer reverter.Fail()
+
+			cpus, err := m.QueryCPUs()
+			if err != nil {
+				return fmt.Errorf("Failed getting CPU list for NIC queues")
+			}
+
+			queueCount := configureQueues(len(cpus))
+
+			// Enable vhost_net offloading if available.
+			info := DriverStatuses()[instancetype.VM].Info
+			_, vhostNetEnabled := info.Features["vhost_net"]
+
+			// Open the device once for each queue and pass to QEMU.
+			fds := make([]string, 0, queueCount)
+			vhostfds := make([]string, 0, queueCount)
+			for i := 0; i < queueCount; i++ {
+				devFile, err := deviceFile()
+				if err != nil {
+					return fmt.Errorf("Error opening netdev file for queue %d: %w", i, err)
+				}
+
+				defer func() { _ = devFile.Close() }() // Close file after device has been added.
+
+				devFDName := fmt.Sprintf("%s.%d", devFile.Name(), i)
+				err = m.SendFile(devFDName, devFile)
+				if err != nil {
+					return fmt.Errorf("Failed to send %q file descriptor for queue %d: %w", devFDName, i, err)
+				}
+
+				reverter.Add(func() { _ = m.CloseFile(devFDName) })
+
+				fds = append(fds, devFDName)
+
+				if vhostNetEnabled {
+					// Open a vhost-net file handle for each device file handle.
+					vhostFile, err := os.OpenFile("/dev/vhost-net", os.O_RDWR, 0)
+					if err != nil {
+						return fmt.Errorf("Error opening /dev/vhost-net for queue %d: %w", i, err)
+					}
+
+					defer func() { _ = vhostFile.Close() }() // Close file after device has been added.
+
+					vhostFDName := fmt.Sprintf("%s.%d", vhostFile.Name(), i)
+					err = m.SendFile(vhostFDName, vhostFile)
+					if err != nil {
+						return fmt.Errorf("Failed to send %q file descriptor for queue %d: %w", vhostFDName, i, err)
+					}
+
+					reverter.Add(func() { _ = m.CloseFile(vhostFDName) })
+
+					vhostfds = append(vhostfds, vhostFDName)
+				}
+			}
+
+			qemuNetDev := map[string]any{
+				"id":    fmt.Sprintf("%s%s", qemuNetDevIDPrefix, escapedDeviceName),
+				"type":  "tap",
+				"vhost": vhostNetEnabled,
+			}
+
+			if shared.StringInSlice(busName, []string{"pcie", "pci"}) {
+				qemuDev["driver"] = "virtio-net-pci"
+			} else if busName == "ccw" {
+				qemuDev["driver"] = "virtio-net-ccw"
+			}
+
+			qemuNetDev["fds"] = strings.Join(fds, ":")
+
+			if len(vhostfds) > 0 {
+				qemuNetDev["vhostfds"] = strings.Join(vhostfds, ":")
+			}
+
+			qemuDev["netdev"] = qemuNetDev["id"].(string)
+			qemuDev["mac"] = devHwaddr
+
+			err = m.AddNIC(qemuNetDev, qemuDev)
+			if err != nil {
+				return fmt.Errorf("Failed setting up device %q: %w", devName, err)
+			}
+
+			reverter.Success()
+			return nil
+		}
+	}
+
 	// Detect MACVTAP interface types and figure out which tap device is being used.
 	// This is so we can open a file handle to the tap device and pass it to the qemu process.
 	if shared.PathExists(fmt.Sprintf("/sys/class/net/%s/macvtap", nicName)) {
@@ -3742,130 +3941,45 @@ func (d *qemu) addNetDevConfig(busName string, qemuDev map[string]string, bootIn
 			return nil, fmt.Errorf("Error parsing tap device ifindex: %w", err)
 		}
 
-		monHook = func(m *qmp.Monitor) error {
-			reverter := revert.New()
-			defer reverter.Fail()
-
-			cpus, err := m.QueryCPUs()
-			if err != nil {
-				return fmt.Errorf("Failed getting CPU list for NIC queues")
-			}
-
-			queueCount := configureQueues(len(cpus))
-
-			// Open the device once for each queue and pass to QEMU.
-			fds := make([]string, 0, queueCount)
-			vhostfds := make([]string, 0, queueCount)
-			for i := 0; i < queueCount; i++ {
-				devFile, err := os.OpenFile(fmt.Sprintf("/dev/tap%d", ifindex), os.O_RDWR, 0)
-				if err != nil {
-					return fmt.Errorf("Error opening netdev file %q: %w", devFile.Name(), err)
-				}
-
-				defer func() { _ = devFile.Close() }() // Close file after device has been added.
-
-				devFDName := fmt.Sprintf("%s.%d", devFile.Name(), i)
-				err = m.SendFile(devFDName, devFile)
-				if err != nil {
-					return fmt.Errorf("Failed to send %q file descriptor: %w", devFDName, err)
-				}
-
-				reverter.Add(func() { _ = m.CloseFile(devFDName) })
-
-				fds = append(fds, devFDName)
-
-				// Open a vhost-net file handle for each device file handle. For CPU offloading.
-				vhostFile, err := os.OpenFile("/dev/vhost-net", os.O_RDWR, 0)
-				if err != nil {
-					return fmt.Errorf("Error opening netdev file %q: %w", vhostFile.Name(), err)
-				}
-
-				defer func() { _ = vhostFile.Close() }() // Close file after device has been added.
-
-				vhostFDName := fmt.Sprintf("%s.%d", vhostFile.Name(), i)
-				err = m.SendFile(vhostFDName, vhostFile)
-				if err != nil {
-					return fmt.Errorf("Failed to send %q file descriptor: %w", vhostFDName, err)
-				}
-
-				reverter.Add(func() { _ = m.CloseFile(vhostFDName) })
-
-				vhostfds = append(vhostfds, vhostFDName)
-			}
-
-			qemuNetDev := map[string]any{
-				"id":    fmt.Sprintf("%s%s", qemuNetDevIDPrefix, escapedDeviceName),
-				"type":  "tap",
-				"vhost": true,
-			}
-
-			if shared.StringInSlice(busName, []string{"pcie", "pci"}) {
-				qemuDev["driver"] = "virtio-net-pci"
-			} else if busName == "ccw" {
-				qemuDev["driver"] = "virtio-net-ccw"
-			}
-
-			qemuNetDev["fds"] = strings.Join(fds, ":")
-			qemuNetDev["vhostfds"] = strings.Join(vhostfds, ":")
-
-			qemuDev["netdev"] = qemuNetDev["id"].(string)
-			qemuDev["mac"] = devHwaddr
-
-			err = m.AddNIC(qemuNetDev, qemuDev)
-			if err != nil {
-				return fmt.Errorf("Failed setting up device %q: %w", devName, err)
-			}
-
-			reverter.Success()
-			return nil
+		devFile := func() (*os.File, error) {
+			return os.OpenFile(fmt.Sprintf("/dev/tap%d", ifindex), os.O_RDWR, 0)
 		}
+
+		monHook = tapMonHook(devFile)
 	} else if shared.PathExists(fmt.Sprintf("/sys/class/net/%s/tun_flags", nicName)) {
-		monHook = func(m *qmp.Monitor) error {
-			cpus, err := m.QueryCPUs()
+		// Detect TAP interface and use IOCTL TUNSETIFF on /dev/net/tun to get the file handle to it.
+		// This is so we can open a file handle to the tap device and pass it to the qemu process.
+		devFile := func() (*os.File, error) {
+			revert := revert.New()
+			defer revert.Fail()
+
+			f, err := os.OpenFile("/dev/net/tun", os.O_RDWR, 0)
 			if err != nil {
-				return fmt.Errorf("Failed getting CPU list for NIC queues")
+				return nil, err
 			}
 
-			// Detect TAP (via TUN driver) device.
-			qemuNetDev := map[string]any{
-				"id":         fmt.Sprintf("%s%s", qemuNetDevIDPrefix, escapedDeviceName),
-				"type":       "tap",
-				"vhost":      false, // This is selectively enabled based on QEMU version later.
-				"script":     "no",
-				"downscript": "no",
-				"ifname":     nicName,
-			}
+			revert.Add(func() { _ = f.Close() })
 
-			// vhost-net network accelerator is causing asserts since QEMU 7.2.
-			// Until previous behaviour is restored or we figure out how to pass the veth device using
-			// file descriptors we will just disable the vhost-net accelerator.
-			qemuVer, _ := d.version()
-			vhostMaxVer, _ := version.NewDottedVersion("7.2")
-			if qemuVer != nil && qemuVer.Compare(vhostMaxVer) < 0 {
-				qemuNetDev["vhost"] = true
-			}
-
-			queueCount := configureQueues(len(cpus))
-			if queueCount > 0 {
-				qemuNetDev["queues"] = queueCount
-			}
-
-			if shared.StringInSlice(busName, []string{"pcie", "pci"}) {
-				qemuDev["driver"] = "virtio-net-pci"
-			} else if busName == "ccw" {
-				qemuDev["driver"] = "virtio-net-ccw"
-			}
-
-			qemuDev["netdev"] = qemuNetDev["id"].(string)
-			qemuDev["mac"] = devHwaddr
-
-			err = m.AddNIC(qemuNetDev, qemuDev)
+			ifr, err := unix.NewIfreq(nicName)
 			if err != nil {
-				return fmt.Errorf("Failed setting up device %q: %w", devName, err)
+				return nil, fmt.Errorf("Error creating new ifreq for %q: %w", nicName, err)
 			}
 
-			return nil
+			// These settings need to be compatible with what the LXD device created the interface with
+			// and what QEMU is expecting.
+			ifr.SetUint16(unix.IFF_TAP | unix.IFF_NO_PI | unix.IFF_ONE_QUEUE | unix.IFF_MULTI_QUEUE | unix.IFF_VNET_HDR)
+
+			// Sets the file handle to point to the requested NIC interface.
+			err = unix.IoctlIfreq(int(f.Fd()), unix.TUNSETIFF, ifr)
+			if err != nil {
+				return nil, fmt.Errorf("Error getting TAP file handle for %q: %w", nicName, err)
+			}
+
+			revert.Success()
+			return f, nil
 		}
+
+		monHook = tapMonHook(devFile)
 	} else if shared.PathExists(vhostVDPAPath) {
 		monHook = func(m *qmp.Monitor) error {
 			reverter := revert.New()
@@ -4039,6 +4153,11 @@ func (d *qemu) addGPUDevConfig(cfg *[]cfgSection, bus *qemuBus, gpuConfig []devi
 	}
 
 	vgaMode := func() bool {
+		// No VGA mode on mdev.
+		if vgpu != "" {
+			return false
+		}
+
 		// No VGA mode on non-x86.
 		if d.architecture != osarch.ARCH_64BIT_INTEL_X86 {
 			return false
@@ -4233,8 +4352,7 @@ func (d *qemu) pid() (int, error) {
 	return pid, nil
 }
 
-// forceStop kills the QEMU prorcess if running, performs normal device & operation cleanup and sends stop
-// lifecycle event.
+// forceStop kills the QEMU prorcess if running.
 func (d *qemu) forceStop() error {
 	pid, _ := d.pid()
 	if pid > 0 {
@@ -4242,14 +4360,6 @@ func (d *qemu) forceStop() error {
 		if err != nil {
 			return fmt.Errorf("Failed to stop VM process %d: %w", pid, err)
 		}
-
-		// Wait for QEMU process to exit and perform device cleanup.
-		err = d.onStop("stop")
-		if err != nil {
-			return err
-		}
-
-		d.state.Events.SendLifecycle(d.project.Name, lifecycle.InstanceStopped.Event(d, nil))
 	}
 
 	return nil
@@ -4262,6 +4372,7 @@ func (d *qemu) Stop(stateful bool) error {
 
 	// Must be run prior to creating the operation lock.
 	// Allow to proceed if statusCode is Error or Frozen as we may need to forcefully kill the QEMU process.
+	// Also Stop() is called from migrateSendLive in some cases, and instance status will be Frozen then.
 	statusCode := d.statusCode()
 	if !d.isRunningStatusCode(statusCode) && statusCode != api.Error && statusCode != api.Frozen {
 		return ErrInstanceIsStopped
@@ -4290,36 +4401,33 @@ func (d *qemu) Stop(stateful bool) error {
 	// Connect to the monitor.
 	monitor, err := qmp.Connect(d.monitorPath(), qemuSerialChardevName, d.getMonitorEventHandler())
 	if err != nil {
+		d.logger.Warn("Failed connecting to monitor, forcing stop", logger.Ctx{"err": err})
+
 		// If we fail to connect, it's most likely because the VM is already off, but it could also be
 		// because the qemu process is not responding, check if process still exists and kill it if needed.
 		err = d.forceStop()
-		op.Done(err)
-		return err
-	}
-
-	// Get the wait channel.
-	chDisconnect, err := monitor.Wait()
-	if err != nil {
-		if err == qmp.ErrMonitorDisconnect {
-			// If we fail to wait, it's most likely because the VM is already off, but it could also be
-			// because the qemu process is not responding, check if process still exists and kill it if
-			// needed.
-			err = d.forceStop()
+		if err != nil {
 			op.Done(err)
 			return err
 		}
 
-		op.Done(err)
-		return err
+		// Wait for QEMU process to exit and perform device cleanup.
+		err = d.onStop("stop")
+		if err != nil {
+			op.Done(err)
+			return err
+		}
+
+		d.state.Events.SendLifecycle(d.project.Name, lifecycle.InstanceStopped.Event(d, nil))
+
+		op.Done(nil)
+		return nil
 	}
 
 	// Handle stateful stop.
 	if stateful {
-		// Keep resetting the timer for the next 10 minutes.
-		go d.pidWait(10*time.Minute, op)
-
 		// Dump the state.
-		err := d.saveState(monitor)
+		err = d.saveState(monitor)
 		if err != nil {
 			op.Done(err)
 			return err
@@ -4333,25 +4441,50 @@ func (d *qemu) Stop(stateful bool) error {
 		}
 	}
 
-	// Send the quit command.
-	err = monitor.Quit()
+	// Get the wait channel.
+	chDisconnect, err := monitor.Wait()
 	if err != nil {
-		if err == qmp.ErrMonitorDisconnect {
-			op.Done(nil)
-			return nil
+		d.logger.Warn("Failed getting monitor disconnection channel, forcing stop", logger.Ctx{"err": err})
+		err = d.forceStop()
+		if err != nil {
+			op.Done(err)
+			return err
+		}
+	} else {
+		// Request the VM stop immediately.
+		err = monitor.Quit()
+		if err != nil {
+			d.logger.Warn("Failed sending monitor quit command, forcing stop", logger.Ctx{"err": err})
+			err = d.forceStop()
+			if err != nil {
+				op.Done(err)
+				return err
+			}
 		}
 
-		op.Done(err)
-		return err
-	}
+		// Wait for QEMU to exit (can take a while if pending I/O).
+		// As this is a forceful stop of the VM we don't wait as long as during a clean shutdown because
+		// the QEMU process may be not responding correctly.
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
+		defer cancel()
 
-	// Wait for QEMU to exit (can take a while if pending I/O).
-	<-chDisconnect
+		select {
+		case <-chDisconnect:
+		case <-ctx.Done():
+			d.logger.Warn("Timed out waiting for monitor to disconnect, forcing stop")
+
+			err = d.forceStop()
+			if err != nil {
+				op.Done(err)
+				return err
+			}
+		}
+	}
 
 	// Wait for operation lock to be Done. This is normally completed by onStop which picks up the same
 	// operation lock and then marks it as Done after the instance stops and the devices have been cleaned up.
 	// However if the operation has failed for another reason we will collect the error here.
-	err = op.Wait()
+	err = op.Wait(context.Background())
 	status := d.statusCode()
 	if status != api.Stopped {
 		errPrefix := fmt.Errorf("Failed stopping instance, status is %q", status)
@@ -4361,9 +4494,6 @@ func (d *qemu) Stop(stateful bool) error {
 		}
 
 		return errPrefix
-	} else if op.Action() == "stop" {
-		// If instance stopped, send lifecycle event (even if there has been an error cleaning up).
-		d.state.Events.SendLifecycle(d.project.Name, lifecycle.InstanceStopped.Event(d, nil))
 	}
 
 	// Now handle errors from stop sequence and return to caller if wasn't completed cleanly.
@@ -4954,6 +5084,11 @@ func (d *qemu) Update(args db.InstanceArgs, userRequested bool) error {
 		if oldErr == nil && newErr == nil && oldRootDev["pool"] != newRootDev["pool"] {
 			return fmt.Errorf("Cannot update root disk device pool name to %q", newRootDev["pool"])
 		}
+
+		// Ensure the instance has a root disk.
+		if newErr != nil {
+			return fmt.Errorf("Invalid root disk device: %w", newErr)
+		}
 	}
 
 	// If apparmor changed, re-validate the apparmor profile (even if not running).
@@ -4978,8 +5113,9 @@ func (d *qemu) Update(args db.InstanceArgs, userRequested bool) error {
 			"cluster.evacuate",
 			"limits.memory",
 			"security.agent.metrics",
-			"security.secureboot",
+			"security.csm",
 			"security.devlxd",
+			"security.secureboot",
 		}
 
 		isLiveUpdatable := func(key string) bool {
@@ -5064,6 +5200,9 @@ func (d *qemu) Update(args db.InstanceArgs, userRequested bool) error {
 						return fmt.Errorf("Failed updating memory limit: %w", err)
 					}
 				}
+			} else if key == "security.csm" {
+				// Defer rebuilding nvram until next start.
+				d.localConfig["volatile.apply_nvram"] = "true"
 			} else if key == "security.secureboot" {
 				// Defer rebuilding nvram until next start.
 				d.localConfig["volatile.apply_nvram"] = "true"
@@ -5092,7 +5231,7 @@ func (d *qemu) Update(args db.InstanceArgs, userRequested bool) error {
 		}
 	}
 
-	if d.architectureSupportsUEFI(d.architecture) && shared.StringInSlice("security.secureboot", changedConfig) {
+	if d.architectureSupportsUEFI(d.architecture) && (shared.StringInSlice("security.secureboot", changedConfig) || shared.StringInSlice("security.csm", changedConfig)) {
 		// Re-generate the NVRAM.
 		err = d.setupNvram()
 		if err != nil {
@@ -7298,21 +7437,96 @@ func (d *qemu) DeviceEventHandler(runConf *deviceConfig.RunConfig) error {
 	return nil
 }
 
-// vsockID returns the vsock Context ID for the VM.
-func (d *qemu) vsockID() int {
-	// We use the system's own VsockID as the base.
-	//
-	// This is either "2" for a physical system or the VM's own id if
-	// running inside of a VM.
-	//
-	// To this we add 1 for backward compatibility with prior logic
-	// which would start at id 3 rather than id 2. Removing that offset
-	// would cause conflicts between existing VMs until they're all rebooted.
-	//
-	// We then add the VM's own instance id (1 or higher) to give us a
-	// unique, non-clashing context ID for our guest.
+// reservedVsockID returns true if the given vsockID equals 0, 1 or 2.
+// Those are reserved and we cannot use them.
+func (d *qemu) reservedVsockID(vsockID uint32) bool {
+	return vsockID <= 2
+}
 
-	return int(d.state.OS.VsockID) + 1 + d.id
+// getVsockID returns the vsock Context ID for the VM.
+func (d *qemu) getVsockID() (uint32, error) {
+	existingVsockID, ok := d.localConfig["volatile.vsock_id"]
+	if ok {
+		vsockID, err := strconv.ParseUint(existingVsockID, 10, 32)
+		if err != nil {
+			return 0, fmt.Errorf("Failed to parse volatile.vsock_id: %q: %w", existingVsockID, err)
+		}
+
+		if d.reservedVsockID(uint32(vsockID)) {
+			return 0, fmt.Errorf("Failed to use reserved vsock Context ID: %q", vsockID)
+		}
+
+		return uint32(vsockID), nil
+	}
+
+	return 0, fmt.Errorf("Context ID not set in volatile.vsock_id")
+}
+
+// freeVsockID returns true if the given vsockID is not yet acquired.
+func (d *qemu) freeVsockID(vsockID uint32) bool {
+	c, err := lxdvsock.Dial(vsockID, shared.HTTPSDefaultPort)
+	if err != nil {
+		var unixErrno unix.Errno
+
+		if !errors.As(err, &unixErrno) {
+			return false
+		}
+
+		if unixErrno == unix.ENODEV {
+			// The syscall to the vsock device returned "no such device".
+			// This means the address (Context ID) is free.
+			return true
+		}
+	}
+
+	// Address is already in use.
+	c.Close()
+	return false
+}
+
+// nextVsockID returns the next free vsock Context ID for the VM.
+// It tries to acquire one randomly until the timeout exceeds.
+func (d *qemu) nextVsockID() (uint32, error) {
+	// Check if vsock ID from last VM start is present in volatile, then use that.
+	// This allows a running VM to be recovered after DB record deletion and that an agent connection still works
+	// after the VM's instance ID has changed.
+	// Continue in case of error since the caller requires a valid vsockID in any case.
+	vsockID, err := d.getVsockID()
+	if err == nil {
+		// Check if the vsock ID from last VM start is still not acquired in case the VM was stopped.
+		if d.freeVsockID(vsockID) {
+			return vsockID, nil
+		}
+	}
+
+	instanceUUID := uuid.Parse(d.localConfig["volatile.uuid"])
+	if instanceUUID == nil {
+		return 0, fmt.Errorf("Failed to parse instance UUID from volatile.uuid")
+	}
+
+	r, err := util.GetStableRandomGenerator(instanceUUID.String())
+	if err != nil {
+		return 0, fmt.Errorf("Failed generating stable random seed from instance UUID %q: %w", instanceUUID, err)
+	}
+
+	timeout := 5 * time.Second
+
+	// Try to find a new Context ID.
+	for start := time.Now(); time.Since(start) <= timeout; {
+		candidateVsockID := r.Uint32()
+
+		if d.reservedVsockID(candidateVsockID) {
+			continue
+		}
+
+		if d.freeVsockID(candidateVsockID) {
+			return candidateVsockID, nil
+		}
+
+		continue
+	}
+
+	return 0, fmt.Errorf("Timeout exceeded whilst trying to acquire the next vsock Context ID")
 }
 
 // InitPID returns the instance's current process ID.
@@ -7368,19 +7582,18 @@ func (d *qemu) statusCode() api.StatusCode {
 		return api.Error
 	}
 
-	if status == "running" {
-		if shared.IsTrue(d.LocalConfig()["volatile.last_state.ready"]) {
+	switch status {
+	case "prelaunch", "running":
+		if status == "running" && shared.IsTrue(d.LocalConfig()["volatile.last_state.ready"]) {
 			return api.Ready
 		}
 
 		return api.Running
-	} else if status == "paused" || status == "postmigrate" {
+	case "inmigrate", "postmigrate", "finish-migrate", "save-vm", "suspended", "paused":
 		return api.Frozen
-	} else if status == "internal-error" || status == "io-error" {
+	default:
 		return api.Error
 	}
-
-	return api.Stopped
 }
 
 // State returns the instance's state code.
@@ -7646,14 +7859,14 @@ func (d *qemu) Info() instance.Info {
 		return data
 	}
 
-	if !shared.PathExists("/dev/vsock") {
-		data.Error = fmt.Errorf("Vsock support is missing (no /dev/vsock)")
-		return data
-	}
-
 	err := util.LoadModule("vhost_vsock")
 	if err != nil {
 		data.Error = fmt.Errorf("vhost_vsock kernel module not loaded")
+		return data
+	}
+
+	if !shared.PathExists("/dev/vsock") {
+		data.Error = fmt.Errorf("Vsock support is missing (no /dev/vsock)")
 		return data
 	}
 
@@ -7859,6 +8072,11 @@ func (d *qemu) checkFeatures(hostArch int, qemuPath string) (map[string]any, err
 				}
 			}
 		}
+	}
+
+	// Check if vhost-net accelerator (for NIC CPU offloading) is available.
+	if shared.PathExists("/dev/vhost-net") {
+		features["vhost_net"] = struct{}{}
 	}
 
 	return features, nil

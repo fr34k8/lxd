@@ -160,8 +160,8 @@ func (b *mockBackend) ListUnknownVolumes(op *operations.Operation) (map[string][
 	return nil, nil
 }
 
-func (b *mockBackend) ImportInstance(inst instance.Instance, poolVol *backupConfig.Config, op *operations.Operation) error {
-	return nil
+func (b *mockBackend) ImportInstance(inst instance.Instance, poolVol *backupConfig.Config, op *operations.Operation) (revert.Hook, error) {
+	return nil, nil
 }
 
 func (b *mockBackend) MigrateInstance(inst instance.Instance, conn io.ReadWriteCloser, args *migration.VolumeSourceArgs, op *operations.Operation) error {
@@ -264,7 +264,7 @@ func (b *mockBackend) DeleteBucketKey(projectName string, bucketName string, key
 	return nil
 }
 
-func (b *mockBackend) ActivateBucket(bucketName string, op *operations.Operation) (*miniod.Process, error) {
+func (b *mockBackend) ActivateBucket(projectName string, bucketName string, op *operations.Operation) (*miniod.Process, error) {
 	return nil, nil
 }
 
@@ -316,8 +316,8 @@ func (b *mockBackend) UnmountCustomVolume(projectName string, volName string, op
 	return true, nil
 }
 
-func (b *mockBackend) ImportCustomVolume(projectName string, poolVol *backupConfig.Config, op *operations.Operation) error {
-	return nil
+func (b *mockBackend) ImportCustomVolume(projectName string, poolVol *backupConfig.Config, op *operations.Operation) (revert.Hook, error) {
+	return nil, nil
 }
 
 func (b *mockBackend) CreateCustomVolumeSnapshot(projectName string, volName string, newSnapshotName string, expiryDate time.Time, op *operations.Operation) error {
@@ -345,5 +345,9 @@ func (b *mockBackend) BackupCustomVolume(projectName string, volName string, tar
 }
 
 func (b *mockBackend) CreateCustomVolumeFromBackup(srcBackup backup.Info, srcData io.ReadSeeker, op *operations.Operation) error {
+	return nil
+}
+
+func (b *mockBackend) CreateCustomVolumeFromISO(projectName string, volName string, srcData io.ReadSeeker, size int64, op *operations.Operation) error {
 	return nil
 }

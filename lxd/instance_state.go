@@ -16,6 +16,7 @@ import (
 	"github.com/lxc/lxd/lxd/response"
 	"github.com/lxc/lxd/shared"
 	"github.com/lxc/lxd/shared/api"
+	"github.com/lxc/lxd/shared/version"
 )
 
 // swagger:operation GET /1.0/instances/{name}/state instances instance_state_get
@@ -64,6 +65,8 @@ import (
 //	  "500":
 //	    $ref: "#/responses/InternalServerError"
 func instanceState(d *Daemon, r *http.Request) response.Response {
+	s := d.State()
+
 	instanceType, err := urlInstanceTypeDetect(r)
 	if err != nil {
 		return response.SmartError(err)
@@ -80,7 +83,7 @@ func instanceState(d *Daemon, r *http.Request) response.Response {
 	}
 
 	// Handle requests targeted to a container on a different node
-	resp, err := forwardedResponseIfInstanceIsRemote(d, r, projectName, name, instanceType)
+	resp, err := forwardedResponseIfInstanceIsRemote(s, r, projectName, name, instanceType)
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -89,7 +92,7 @@ func instanceState(d *Daemon, r *http.Request) response.Response {
 		return resp
 	}
 
-	c, err := instance.LoadByProjectAndName(d.State(), projectName, name)
+	c, err := instance.LoadByProjectAndName(s, projectName, name)
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -136,6 +139,8 @@ func instanceState(d *Daemon, r *http.Request) response.Response {
 //	  "500":
 //	    $ref: "#/responses/InternalServerError"
 func instanceStatePut(d *Daemon, r *http.Request) response.Response {
+	s := d.State()
+
 	instanceType, err := urlInstanceTypeDetect(r)
 	if err != nil {
 		return response.SmartError(err)
@@ -152,7 +157,7 @@ func instanceStatePut(d *Daemon, r *http.Request) response.Response {
 	}
 
 	// Handle requests targeted to a container on a different node
-	resp, err := forwardedResponseIfInstanceIsRemote(d, r, projectName, name, instanceType)
+	resp, err := forwardedResponseIfInstanceIsRemote(s, r, projectName, name, instanceType)
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -171,14 +176,14 @@ func instanceStatePut(d *Daemon, r *http.Request) response.Response {
 	}
 
 	// Check if the cluster member is evacuated.
-	if d.db.Cluster.LocalNodeIsEvacuated() && req.Action != "stop" {
+	if s.DB.Cluster.LocalNodeIsEvacuated() && req.Action != "stop" {
 		return response.Forbidden(fmt.Errorf("Cluster member is evacuated"))
 	}
 
 	// Don't mess with instances while in setup mode.
 	<-d.waitReady.Done()
 
-	inst, err := instance.LoadByProjectAndName(d.State(), projectName, name)
+	inst, err := instance.LoadByProjectAndName(s, projectName, name)
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -195,9 +200,9 @@ func instanceStatePut(d *Daemon, r *http.Request) response.Response {
 		return doInstanceStatePut(inst, req)
 	}
 
-	resources := map[string][]string{}
-	resources["instances"] = []string{name}
-	op, err := operations.OperationCreate(d.State(), projectName, operations.OperationClassTask, opType, resources, nil, do, nil, nil, r)
+	resources := map[string][]api.URL{}
+	resources["instances"] = []api.URL{*api.NewURL().Path(version.APIVersion, "instances", name)}
+	op, err := operations.OperationCreate(s, projectName, operations.OperationClassTask, opType, resources, nil, do, nil, nil, r)
 	if err != nil {
 		return response.InternalError(err)
 	}
@@ -223,25 +228,31 @@ func instanceActionToOptype(action string) (operationtype.Type, error) {
 }
 
 func doInstanceStatePut(inst instance.Instance, req api.InstanceStatePut) error {
+	if req.Force {
+		// A zero timeout indicates to do a forced stop/restart.
+		req.Timeout = 0
+	} else if req.Timeout < 0 {
+		// If no timeout requested set a high default shutdown timeout. This way if the instance does not
+		// respond to shutdown request the operation lock won't linger forever.
+		req.Timeout = 600
+	}
+
+	timeout := time.Duration(req.Timeout) * time.Second
+
 	switch shared.InstanceAction(req.Action) {
 	case shared.Start:
 		return inst.Start(req.Stateful)
 	case shared.Stop:
 		if req.Stateful {
 			return inst.Stop(req.Stateful)
-		} else if req.Timeout == 0 || req.Force {
+		} else if req.Timeout == 0 {
 			return inst.Stop(false)
 		} else {
-			return inst.Shutdown(time.Duration(req.Timeout) * time.Second)
+			return inst.Shutdown(timeout)
 		}
 
 	case shared.Restart:
-		timeout := req.Timeout
-		if req.Force {
-			timeout = 0
-		}
-
-		return inst.Restart(time.Duration(timeout))
+		return inst.Restart(timeout)
 	case shared.Freeze:
 		return inst.Freeze()
 	case shared.Unfreeze:

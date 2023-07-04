@@ -146,7 +146,7 @@ See the linked YouTube video for the complete tutorial using four machines.
 
      Therefore, you must specify either an unmanaged bridge interface or an unused physical interface as the parent for the physical network that is used for OVN uplink.
      The instructions assume that you are using a manually created unmanaged bridge.
-     See [Configuring network bridges](https://netplan.readthedocs.io/en/stable/examples/#configuring-network-bridges) for instructions on how to set up this bridge.
+     See [How to configure network bridges](https://netplan.readthedocs.io/en/stable/examples/#how-to-configure-network-bridges) for instructions on how to set up this bridge.
 
    Gateway
    : Run `ip -4 route show default` and `ip -6 route show default`.
@@ -168,12 +168,12 @@ See the linked YouTube video for the complete tutorial using four machines.
 
 1. To test the OVN network, create some instances and check the network connectivity:
 
-       lxc launch images:ubuntu/22.04 c1 --network my-ovn
-       lxc launch images:ubuntu/22.04 c2 --network my-ovn
-       lxc launch images:ubuntu/22.04 c3 --network my-ovn
-       lxc launch images:ubuntu/22.04 c4 --network my-ovn
+       lxc launch ubuntu:22.04 c1 --network my-ovn
+       lxc launch ubuntu:22.04 c2 --network my-ovn
+       lxc launch ubuntu:22.04 c3 --network my-ovn
+       lxc launch ubuntu:22.04 c4 --network my-ovn
        lxc list
        lxc exec c4 bash
        ping <IP of c1>
        ping <nameserver>
-       ping6 -n www.linuxcontainers.org
+       ping6 -n www.example.com

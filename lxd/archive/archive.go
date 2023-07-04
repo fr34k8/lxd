@@ -77,7 +77,7 @@ func ExtractWithFds(cmd string, args []string, allowedCmds []string, stdin io.Re
 func CompressedTarReader(ctx context.Context, r io.ReadSeeker, unpacker []string, sysOS *sys.OS, outputPath string) (*tar.Reader, context.CancelFunc, error) {
 	ctx, cancelFunc := context.WithCancel(ctx)
 
-	_, err := r.Seek(0, 0)
+	_, err := r.Seek(0, io.SeekStart)
 	if err != nil {
 		return nil, cancelFunc, err
 	}
@@ -183,7 +183,7 @@ func Unpack(file string, path string, blockBackend bool, sysOS *sys.OS, tracker 
 		command = "unsquashfs"
 		args = append(args, "-f", "-d", path, "-n")
 
-		// Limit unsquashfs chunk size to 10% of memory and up to 256MB (default)
+		// Limit unsquashfs chunk size to 10% of memory and up to 256MiB (default)
 		// When running on a low memory system, also disable multi-processing
 		mem, err := shared.DeviceTotalMemory()
 		mem = mem / 1024 / 1024 / 10

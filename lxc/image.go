@@ -14,7 +14,6 @@ import (
 	"gopkg.in/yaml.v2"
 
 	"github.com/lxc/lxd/client"
-	"github.com/lxc/lxd/lxc/utils"
 	"github.com/lxc/lxd/shared"
 	"github.com/lxc/lxd/shared/api"
 	cli "github.com/lxc/lxd/shared/cmd"
@@ -260,7 +259,7 @@ func (c *cmdImageCopy) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	// Register progress handler
-	progress := utils.ProgressRenderer{
+	progress := cli.ProgressRenderer{
 		Format: i18n.G("Copying the image: %s"),
 		Quiet:  c.global.flagQuiet,
 	}
@@ -272,7 +271,7 @@ func (c *cmdImageCopy) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	// Wait for operation to finish
-	err = utils.CancelableWait(op, &progress)
+	err = cli.CancelableWait(op, &progress)
 	if err != nil {
 		progress.Done("")
 		return err
@@ -555,7 +554,7 @@ func (c *cmdImageExport) Run(cmd *cobra.Command, args []string) error {
 	defer func() { _ = destRootfs.Close() }()
 
 	// Prepare the download request
-	progress := utils.ProgressRenderer{
+	progress := cli.ProgressRenderer{
 		Format: i18n.G("Exporting the image: %s"),
 		Quiet:  c.global.flagQuiet,
 	}
@@ -764,7 +763,7 @@ func (c *cmdImageImport) Run(cmd *cobra.Command, args []string) error {
 		image.Properties[strings.TrimSpace(fields[0])] = strings.TrimSpace(fields[1])
 	}
 
-	progress := utils.ProgressRenderer{
+	progress := cli.ProgressRenderer{
 		Format: i18n.G("Transferring image: %s"),
 		Quiet:  c.global.flagQuiet,
 	}
@@ -812,7 +811,7 @@ func (c *cmdImageImport) Run(cmd *cobra.Command, args []string) error {
 				return err
 			}
 
-			_, err = rootfs.(*os.File).Seek(0, 0)
+			_, err = rootfs.(*os.File).Seek(0, io.SeekStart)
 			if err != nil {
 				return err
 			}
@@ -842,7 +841,7 @@ func (c *cmdImageImport) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	// Wait for operation to finish
-	err = utils.CancelableWait(op, &progress)
+	err = cli.CancelableWait(op, &progress)
 	if err != nil {
 		progress.Done("")
 		return err
@@ -942,7 +941,7 @@ func (c *cmdImageInfo) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf(i18n.G("Fingerprint: %s")+"\n", info.Fingerprint)
-	fmt.Printf(i18n.G("Size: %.2fMB")+"\n", float64(info.Size)/1024.0/1024.0)
+	fmt.Printf(i18n.G("Size: %.2fMiB")+"\n", float64(info.Size)/1024.0/1024.0)
 	fmt.Printf(i18n.G("Architecture: %s")+"\n", info.Architecture)
 	fmt.Printf(i18n.G("Type: %s")+"\n", imgType)
 	fmt.Printf(i18n.G("Public: %s")+"\n", public)
@@ -1128,7 +1127,7 @@ func (c *cmdImageList) architectureColumnData(image api.Image) string {
 }
 
 func (c *cmdImageList) sizeColumnData(image api.Image) string {
-	return fmt.Sprintf("%.2fMB", float64(image.Size)/1024.0/1024.0)
+	return fmt.Sprintf("%.2fMiB", float64(image.Size)/1024.0/1024.0)
 }
 
 func (c *cmdImageList) typeColumnData(image api.Image) string {
@@ -1311,7 +1310,7 @@ func (c *cmdImageList) Run(cmd *cobra.Command, args []string) error {
 		data = append(data, row)
 	}
 
-	sort.Sort(utils.StringList(data))
+	sort.Sort(cli.StringList(data))
 
 	rawData := make([]*api.Image, len(images))
 	for i := range images {
@@ -1323,7 +1322,7 @@ func (c *cmdImageList) Run(cmd *cobra.Command, args []string) error {
 		headers = append(headers, column.Name)
 	}
 
-	return utils.RenderTable(c.flagFormat, headers, data, rawData)
+	return cli.RenderTable(c.flagFormat, headers, data, rawData)
 }
 
 // Refresh.
@@ -1363,7 +1362,7 @@ func (c *cmdImageRefresh) Run(cmd *cobra.Command, args []string) error {
 		}
 
 		image := c.image.dereferenceAlias(resource.server, "", resource.name)
-		progress := utils.ProgressRenderer{
+		progress := cli.ProgressRenderer{
 			Format: i18n.G("Refreshing the image: %s"),
 			Quiet:  c.global.flagQuiet,
 		}

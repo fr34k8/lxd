@@ -29,8 +29,11 @@ type ceph struct {
 func (d *ceph) load() error {
 	// Register the patches.
 	d.patches = map[string]func() error{
-		"storage_lvm_skipactivation":       nil,
-		"storage_missing_snapshot_records": nil,
+		"storage_lvm_skipactivation":                         nil,
+		"storage_missing_snapshot_records":                   nil,
+		"storage_delete_old_snapshot_records":                nil,
+		"storage_zfs_drop_block_volume_filesystem_extension": nil,
+		"storage_prefix_bucket_names_with_project":           nil,
 	}
 
 	// Done if previously loaded.
@@ -94,15 +97,8 @@ func (d *ceph) getPlaceholderVolume() Volume {
 	return NewVolume(d, d.name, VolumeType("lxd"), ContentTypeFS, d.config["ceph.osd.pool_name"], nil, nil)
 }
 
-// Create is called during pool creation and is effectively using an empty driver struct.
-// WARNING: The Create() function cannot rely on any of the struct attributes being set.
-func (d *ceph) Create() error {
-	revert := revert.New()
-	defer revert.Fail()
-
-	d.config["volatile.initial_source"] = d.config["source"]
-
-	// Set default properties if missing.
+// FillConfig populates the storage pool's configuration file with the default values.
+func (d *ceph) FillConfig() error {
 	if d.config["ceph.cluster_name"] == "" {
 		d.config["ceph.cluster_name"] = CephDefaultCluster
 	}
@@ -113,12 +109,28 @@ func (d *ceph) Create() error {
 
 	if d.config["ceph.osd.pg_num"] == "" {
 		d.config["ceph.osd.pg_num"] = "32"
-	} else {
-		// Validate.
-		_, err := units.ParseByteSizeString(d.config["ceph.osd.pg_num"])
-		if err != nil {
-			return err
-		}
+	}
+
+	return nil
+}
+
+// Create is called during pool creation and is effectively using an empty driver struct.
+// WARNING: The Create() function cannot rely on any of the struct attributes being set.
+func (d *ceph) Create() error {
+	revert := revert.New()
+	defer revert.Fail()
+
+	d.config["volatile.initial_source"] = d.config["source"]
+
+	err := d.FillConfig()
+	if err != nil {
+		return err
+	}
+
+	// Validate.
+	_, err = units.ParseByteSizeString(d.config["ceph.osd.pg_num"])
+	if err != nil {
+		return err
 	}
 
 	// Quick check.
@@ -381,7 +393,7 @@ func (d *ceph) MigrationTypes(contentType ContentType, refresh bool, copySnapsho
 	if refresh {
 		var transportType migration.MigrationFSType
 
-		if contentType == ContentTypeBlock {
+		if IsContentBlock(contentType) {
 			transportType = migration.MigrationFSType_BLOCK_AND_RSYNC
 		} else {
 			transportType = migration.MigrationFSType_RSYNC

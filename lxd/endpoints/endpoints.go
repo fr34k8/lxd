@@ -60,18 +60,8 @@ type Config struct {
 	// It can be updated after the endpoints are up using PprofUpdateAddress().
 	DebugAddress string
 
-	// MetricsAddress sets the address for the metrics endpoint.
-	//
-	// It can be updated after the endpoints are up using MetricsUpdateAddress().
-	MetricsAddress string
-
 	// HTTP server handling requests for the LXD metrics API.
 	MetricsServer *http.Server
-
-	// StorageBucketsAddress sets the address for the storage buckets endpoint.
-	//
-	// It can be updated after the endpoints are up using StorageBucketsUpdateAddress().
-	StorageBucketsAddress string
 
 	// HTTP server handling requests for the LXD storage buckets API.
 	StorageBucketsServer *http.Server
@@ -191,7 +181,7 @@ func (e *Endpoints) up(config *Config) error {
 		pprof:          pprofCreateServer(),
 		metrics:        config.MetricsServer,
 		storageBuckets: config.StorageBucketsServer,
-		vsock:          config.VsockServer,
+		vmvsock:        config.VsockServer,
 	}
 
 	e.cert = config.Cert
@@ -228,7 +218,7 @@ func (e *Endpoints) up(config *Config) error {
 
 	// Start the VM sock listener.
 	if config.VsockSupport {
-		e.listeners[vsock], err = createVsockListener(e.cert)
+		e.listeners[vmvsock], err = createVsockListener(e.cert)
 		if err != nil {
 			return err
 		}
@@ -316,32 +306,35 @@ func (e *Endpoints) up(config *Config) error {
 		e.serve(pprof)
 	}
 
-	if config.MetricsAddress != "" {
-		e.listeners[metrics], err = metricsCreateListener(config.MetricsAddress, e.cert)
-		if err != nil {
-			return err
-		}
-
-		e.serve(metrics)
+	for kind := range e.listeners {
+		e.serve(kind)
 	}
 
-	if config.StorageBucketsAddress != "" {
-		e.listeners[storageBuckets], err = storageBucketsCreateListener(config.StorageBucketsAddress, e.cert)
-		if err != nil {
-			return err
-		}
+	return nil
+}
 
-		e.serve(storageBuckets)
+// UpMetrics brings up metrics listener on specified address.
+func (e *Endpoints) UpMetrics(listenAddress string) error {
+	var err error
+	e.listeners[metrics], err = metricsCreateListener(listenAddress, e.cert)
+	if err != nil {
+		return fmt.Errorf("Failed starting metrics listener: %w", err)
 	}
 
-	if e.listeners[vsock] != nil {
-		e.serve(vsock)
+	e.serve(metrics)
+
+	return nil
+}
+
+// UpStorageBuckets brings up storage buvkets listener on specified address.
+func (e *Endpoints) UpStorageBuckets(listenAddress string) error {
+	var err error
+	e.listeners[storageBuckets], err = storageBucketsCreateListener(listenAddress, e.cert)
+	if err != nil {
+		return fmt.Errorf("Failed starting storage buckets listener: %w", err)
 	}
 
-	e.serve(devlxd)
-
-	e.serve(local)
-	e.serve(network)
+	e.serve(storageBuckets)
 
 	return nil
 }
@@ -398,8 +391,8 @@ func (e *Endpoints) Down() error {
 		}
 	}
 
-	if e.listeners[vsock] != nil {
-		err := e.closeListener(vsock)
+	if e.listeners[vmvsock] != nil {
+		err := e.closeListener(vmvsock)
 		if err != nil {
 			return err
 		}
@@ -494,7 +487,7 @@ const (
 	pprof
 	cluster
 	metrics
-	vsock
+	vmvsock
 	storageBuckets
 )
 
@@ -506,6 +499,6 @@ var descriptions = map[kind]string{
 	pprof:          "pprof socket",
 	cluster:        "cluster socket",
 	metrics:        "metrics socket",
-	vsock:          "VM socket",
+	vmvsock:        "VM socket",
 	storageBuckets: "Storage buckets socket",
 }

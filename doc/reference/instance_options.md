@@ -88,6 +88,7 @@ Key                                             | Type      | Default           
 :--                                             | :---      | :------           | :----------   | :----------               | :----------
 `limits.cpu`                                    | string    | for VMs: 1 CPU    | yes           | -                         | Number or range of CPUs to expose to the instance; see {ref}`instance-options-limits-cpu`
 `limits.cpu.allowance`                          | string    | `100%`            | yes           | container                 | Controls how much of the CPU can be used: either a percentage (`50%`) for a soft limit or a chunk of time (`25ms/100ms`) for a hard limit; see {ref}`instance-options-limits-cpu-container`
+`limits.cpu.nodes`                              | string    | -                 | yes           | -                         | Comma-separated list of NUMA node IDs or ranges to place the instance CPUs on; see {ref}`instance-options-limits-cpu-container`
 `limits.cpu.priority`                           | integer   | `10` (maximum)    | yes           | container                 | CPU scheduling priority compared to other instances sharing the same CPUs when overcommitting resources (integer between 0 and 10); see {ref}`instance-options-limits-cpu-container`
 `limits.disk.priority`                          | integer   | `5` (medium)      | yes           | -                         | Controls how much priority to give to the instance's I/O requests when under load (integer between 0 and 10)
 `limits.hugepages.64KB`                         | string    | -                 | yes           | container                 | Fixed value in bytes (various suffixes supported, see {ref}`instances-limit-units`) to limit number of 64 KB huge pages; see {ref}`instance-options-limits-hugepages`
@@ -105,13 +106,24 @@ Key                                             | Type      | Default           
 
 ### CPU limits
 
+You have different options to limit CPU usage:
+
+- Set `limits.cpu` to restrict which CPUs the instance can see and use.
+  See {ref}`instance-options-limits-cpu` for how to set this option.
+- Set `limits.cpu.allowance` to restrict the load an instance can put on the available CPUs.
+  This option is available only for containers.
+  See {ref}`instance-options-limits-cpu-container` for how to set this option.
+
+It is possible to set both options at the same time to restrict both which CPUs are visible to the instance and the allowed usage of those instances.
+However, if you use `limits.cpu.allowance` with a time limit, you should avoid using `limits.cpu` in addition, because that puts a lot of constraints on the scheduler and might lead to less efficient allocations.
+
 The CPU limits are implemented through a mix of the `cpuset` and `cpu` cgroup controllers.
 
 (instance-options-limits-cpu)=
 #### CPU pinning
 
 `limits.cpu` results in CPU pinning through the `cpuset` controller.
-You can specify either which CPUs to use or how many CPUs to use:
+You can specify either which CPUs or how many CPUs are visible and available to the instance:
 
 - To specify which CPUs to use, set `limits.cpu` to either a set of CPUs (for example, `1,2,3`) or a CPU range (for example, `0-3`).
 
@@ -119,7 +131,14 @@ You can specify either which CPUs to use or how many CPUs to use:
 - If you specify a number (for example, `4`) of CPUs, LXD will do dynamic load-balancing of all instances that aren't pinned to specific CPUs, trying to spread the load on the machine.
   Instances are re-balanced every time an instance starts or stops, as well as whenever a CPU is added to the system.
 
+##### CPU limits for virtual machines
+
 ```{note}
+LXD supports live-updating the `limits.cpu` option.
+However, for virtual machines, this only means that the respective CPUs are hotplugged.
+Depending on the guest operating system, you might need to either restart the instance or complete some manual actions to bring the new CPUs online.
+```
+
 LXD virtual machines default to having just one vCPU allocated, which shows up as matching the host CPU vendor and type, but has a single core and no threads.
 
 When `limits.cpu` is set to a single integer, LXD allocates multiple vCPUs and exposes them to the guest as full cores.
@@ -136,16 +155,21 @@ The NUMA layout is similarly replicated and in this scenario, the guest would mo
 In such an environment with multiple NUMA nodes, the memory is similarly divided across NUMA nodes and be pinned accordingly on the host and then exposed to the guest.
 
 All this allows for very high performance operations in the guest as the guest scheduler can properly reason about sockets, cores and threads as well as consider NUMA topology when sharing memory or moving processes across NUMA nodes.
-```
 
 (instance-options-limits-cpu-container)=
 #### Allowance and priority (container only)
 
 `limits.cpu.allowance` drives either the CFS scheduler quotas when passed a time constraint, or the generic CPU shares mechanism when passed a percentage value:
 
-- The time constraint (for example, `20ms/50ms`) is relative to one CPU worth of time, so to restrict to two CPUs worth of time, use something like `100ms/50ms`.
-- When using a percentage value, the limit is applied only when under load.
+- The time constraint (for example, `20ms/50ms`) is a hard limit.
+  For example, if you want to allow the container to use a maximum of one CPU, set `limits.cpu.allowance` to a value like `100ms/100ms`.
+  The value is relative to one CPU worth of time, so to restrict to two CPUs worth of time, use something like `100ms/50ms` or `200ms/100ms`.
+- When using a percentage value, the limit is a soft limit that is applied only when under load.
   It is used to calculate the scheduler priority for the instance, relative to any other instance that is using the same CPU or CPUs.
+  For example, to limit the CPU usage of the container to one CPU when under load, set `limits.cpu.allowance` to `100%`.
+
+`limits.cpu.nodes` can be used to restrict the CPUs that the instance can use to a specific set of NUMA nodes.
+To specify which NUMA nodes to use, set `limits.cpu.nodes` to either a set of NUMA node IDs (for example, `0,1`) or a set of NUMA node ranges (for example, `0-1,2-4`).
 
 `limits.cpu.priority` is another factor that is used to compute the scheduler priority score when a number of instances sharing a set of CPUs have the same percentage of CPU assigned to them.
 
@@ -352,6 +376,7 @@ The following instance options control the {ref}`security` policies of the insta
 
 Key                                             | Type      | Default           | Live update   | Condition                 | Description
 :--                                             | :---      | :------           | :----------   | :----------               | :----------
+`security.csm`                                  | bool      | `false`           | no            | virtual machine           | Controls whether to use a firmware that supports UEFI-incompatible operating systems (when enabling this option, set `security.secureboot` to `false`)
 `security.devlxd`                               | bool      | `true`            | no            | -                         | Controls the presence of `/dev/lxd` in the instance
 `security.devlxd.images`                        | bool      | `false`           | no            | container                 | Controls the availability of the `/1.0/images` API over `devlxd`
 `security.idmap.base`                           | integer   | -                 | no            | unprivileged container    | The base host ID to use for the allocation (overrides auto-detection)
@@ -362,7 +387,7 @@ Key                                             | Type      | Default           
 `security.protection.delete`                    | bool      | `false`           | yes           | -                         | Prevents the instance from being deleted
 `security.protection.shift`                     | bool      | `false`           | yes           | container                 | Prevents the instance's file system from being UID/GID shifted on startup
 `security.agent.metrics`                        | bool      | `true`            | no            | virtual machine           | Controls whether the `lxd-agent` is queried for state information and metrics
-`security.secureboot`                           | bool      | `true`            | no            | virtual machine           | Controls whether UEFI secure boot is enabled with the default Microsoft keys
+`security.secureboot`                           | bool      | `true`            | no            | virtual machine           | Controls whether UEFI secure boot is enabled with the default Microsoft keys (when disabling this option, consider enabling `security.csm`)
 `security.sev`                                  | bool      | `false`           | no            | virtual machine           | Controls whether AMD SEV (Secure Encrypted Virtualization) is enabled for this VM
 `security.sev.policy.es`                        | bool      | `false`           | no            | virtual machine           | Controls whether AMD SEV-ES (SEV Encrypted State) is enabled for this VM
 `security.sev.session.dh`                       | string    | `true`            | no            | virtual machine           | The guest owner's `base64`-encoded Diffie-Hellman key
@@ -432,6 +457,7 @@ Key                                         | Type      | Description
 `volatile.<name>.last_state.created`        | string    | Whether the network device physical device was created (`true` or `false`)
 `volatile.<name>.last_state.mtu`            | string    | Network device original MTU used when moving a physical device into an instance
 `volatile.<name>.last_state.hwaddr`         | string    | Network device original MAC used when moving a physical device into an instance
+`volatile.<name>.last_state.ip_addresses`   | string    | Network device comma-separated list of last used IP addresses
 `volatile.<name>.last_state.vdpa.name`      | string    | VDPA device name used when moving a VDPA device file descriptor into an instance
 `volatile.<name>.last_state.vf.id`          | string    | SR-IOV virtual function ID used when moving a VF into an instance
 `volatile.<name>.last_state.vf.hwaddr`      | string    | SR-IOV virtual function original MAC used when moving a VF into an instance

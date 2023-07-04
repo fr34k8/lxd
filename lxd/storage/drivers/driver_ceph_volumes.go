@@ -180,7 +180,7 @@ func (d *ceph) CreateVolume(vol Volume, filler *VolumeFiller, op *operations.Ope
 			var err error
 			var devPath string
 
-			if vol.contentType == ContentTypeBlock {
+			if IsContentBlock(vol.contentType) {
 				// Get the device path.
 				devPath, err = d.GetVolumeDiskPath(vol)
 				if err != nil {
@@ -1052,7 +1052,7 @@ func (d *ceph) SetVolumeQuota(vol Volume, size string, allowUnsafeResize bool, o
 
 // GetVolumeDiskPath returns the location of a root disk block device.
 func (d *ceph) GetVolumeDiskPath(vol Volume) (string, error) {
-	if vol.IsVMBlock() || (vol.volType == VolumeTypeCustom && vol.contentType == ContentTypeBlock) {
+	if vol.IsVMBlock() || (vol.volType == VolumeTypeCustom && IsContentBlock(vol.contentType)) {
 		_, devPath, err := d.getRBDMappedDevPath(vol, false)
 		return devPath, err
 	}
@@ -1331,6 +1331,7 @@ func (d *ceph) MigrateVolume(vol Volume, conn io.ReadWriteCloser, volSrcArgs *mi
 
 	// Handle simple rsync and block_and_rsync through generic.
 	if volSrcArgs.MigrationType.FSType == migration.MigrationFSType_RSYNC || volSrcArgs.MigrationType.FSType == migration.MigrationFSType_BLOCK_AND_RSYNC {
+		// TODO this should take a temporary snapshot.
 		// Before doing a generic volume migration, we need to ensure volume (or snap volume parent) is
 		// activated to avoid issues activating the snapshot volume device.
 		parent, _, _ := api.GetParentAndSnapshotName(vol.Name())

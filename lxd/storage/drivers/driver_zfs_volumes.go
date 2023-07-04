@@ -20,7 +20,6 @@ import (
 
 	"github.com/lxc/lxd/lxd/archive"
 	"github.com/lxc/lxd/lxd/backup"
-	"github.com/lxc/lxd/lxd/instance/operationlock"
 	"github.com/lxc/lxd/lxd/migration"
 	"github.com/lxc/lxd/lxd/operations"
 	"github.com/lxc/lxd/lxd/revert"
@@ -249,7 +248,7 @@ func (d *zfs) CreateVolume(vol Volume, filler *VolumeFiller, op *operations.Oper
 			var err error
 			var devPath string
 
-			if vol.contentType == ContentTypeBlock {
+			if IsContentBlock(vol.contentType) {
 				// Get the device path.
 				devPath, err = d.GetVolumeDiskPath(vol)
 				if err != nil {
@@ -311,8 +310,9 @@ func (d *zfs) CreateVolume(vol Volume, filler *VolumeFiller, op *operations.Oper
 		}
 
 		if vol.contentType == ContentTypeBlock {
-			// Re-create the FS config volume's readonly snapshot now that the filler function has run and unpacked into both config and block volumes.
-			fsVol := NewVolume(d, d.name, vol.volType, ContentTypeFS, vol.name, vol.config, vol.poolConfig)
+			// Re-create the FS config volume's readonly snapshot now that the filler function has run
+			// and unpacked into both config and block volumes.
+			fsVol := vol.NewVMBlockFilesystemVolume()
 
 			_, err := shared.RunCommand("zfs", "destroy", fmt.Sprintf("%s@readonly", d.dataset(fsVol, false)))
 			if err != nil {
@@ -421,7 +421,7 @@ func (d *zfs) CreateVolumeFromBackup(vol Volume, srcBackup backup.Info, srcData 
 
 	for _, v := range vols {
 		// Find the compression algorithm used for backup source data.
-		_, err := srcData.Seek(0, 0)
+		_, err := srcData.Seek(0, io.SeekStart)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -630,6 +630,9 @@ func (d *zfs) CreateVolumeFromCopy(vol Volume, srcVol Volume, copySnapshots bool
 		_ = unfreezeFS()
 	}
 
+	// Delete the volume created on failure.
+	revert.Add(func() { _ = d.DeleteVolume(vol, op) })
+
 	// If zfs.clone_copy is disabled or source volume has snapshots, then use full copy mode.
 	if shared.IsFalse(d.config["zfs.clone_copy"]) || len(snapshots) > 0 {
 		snapName := strings.SplitN(srcSnapshot, "@", 2)[1]
@@ -691,20 +694,43 @@ func (d *zfs) CreateVolumeFromCopy(vol Volume, srcVol Volume, copySnapshots bool
 		// Configure the pipes.
 		receiver.Stdin, _ = sender.StdoutPipe()
 		receiver.Stdout = os.Stdout
-		receiver.Stderr = os.Stderr
+
+		var recvStderr bytes.Buffer
+		receiver.Stderr = &recvStderr
 
 		// Run the transfer.
 		err := receiver.Start()
 		if err != nil {
-			return err
+			return fmt.Errorf("Failed starting ZFS receive: %w", err)
 		}
 
-		err = sender.Run()
+		var sendStderr bytes.Buffer
+		sender.Stderr = &sendStderr
+		err = sender.Start()
 		if err != nil {
-			return err
+			_ = receiver.Process.Kill()
+			return fmt.Errorf("Failed starting ZFS send: %w", err)
 		}
+
+		senderErr := make(chan error)
+		go func() {
+			err = sender.Wait()
+			if err != nil {
+				_ = receiver.Process.Kill()
+				senderErr <- fmt.Errorf("Failed ZFS send: %w (%s)", err, sendStderr.String())
+				return
+			}
+
+			senderErr <- nil
+		}()
 
 		err = receiver.Wait()
+		if err != nil {
+			_ = receiver.Process.Kill()
+			return fmt.Errorf("Failed ZFS receive: %w (%s)", err, recvStderr.String())
+		}
+
+		err = <-senderErr
 		if err != nil {
 			return err
 		}
@@ -754,9 +780,6 @@ func (d *zfs) CreateVolumeFromCopy(vol Volume, srcVol Volume, copySnapshots bool
 		if err != nil {
 			return err
 		}
-
-		// Delete on revert.
-		revert.Add(func() { _ = d.DeleteVolume(vol, op) })
 	}
 
 	// Apply the properties.
@@ -801,9 +824,18 @@ func (d *zfs) CreateVolumeFromCopy(vol Volume, srcVol Volume, copySnapshots bool
 		}
 	}
 
+	// Pass allowUnsafeResize as true when resizing block backed filesystem volumes because we want to allow
+	// the filesystem to be shrunk as small as possible without needing the safety checks that would prevent
+	// leaving the filesystem in an inconsistent state if the resize couldn't be completed. This is because if
+	// the resize fails we will delete the volume anyway so don't have to worry about it being inconsistent.
+	var allowUnsafeResize bool
+	if d.isBlockBacked(vol) && vol.contentType == ContentTypeFS {
+		allowUnsafeResize = true
+	}
+
 	// Resize volume to the size specified. Only uses volume "size" property and does not use pool/defaults
 	// to give the caller more control over the size being used.
-	err = d.SetVolumeQuota(vol, vol.config["size"], false, op)
+	err = d.SetVolumeQuota(vol, vol.config["size"], allowUnsafeResize, op)
 	if err != nil {
 		return err
 	}
@@ -1032,17 +1064,18 @@ func (d *zfs) createVolumeFromMigrationOptimized(vol Volume, conn io.ReadWriteCl
 		}
 	}
 
+	if !volTargetArgs.Refresh {
+		revert.Add(func() {
+			_ = d.DeleteVolume(vol, op)
+		})
+	}
+
 	// Transfer the main volume.
 	wrapper := migration.ProgressWriter(op, "fs_progress", vol.name)
 	err = d.receiveDataset(vol, conn, wrapper)
 	if err != nil {
-		_ = d.DeleteVolume(vol, op)
 		return fmt.Errorf("Failed receiving volume %q: %w", vol.Name(), err)
 	}
-
-	revert.Add(func() {
-		_ = d.DeleteVolume(vol, op)
-	})
 
 	// Strip internal snapshots.
 	entries, err := d.getDatasets(d.dataset(vol, false))
@@ -1537,7 +1570,7 @@ func (d *zfs) SetVolumeQuota(vol Volume, size string, allowUnsafeResize bool, op
 	inUse := vol.MountInUse()
 
 	// Handle volume datasets.
-	if vol.contentType == ContentTypeBlock || d.isBlockBacked(vol) && vol.contentType == ContentTypeFS {
+	if d.isBlockBacked(vol) && vol.contentType == ContentTypeFS || IsContentBlock(vol.contentType) {
 		// Do nothing if size isn't specified.
 		if sizeBytes <= 0 {
 			return nil
@@ -1866,7 +1899,7 @@ func (d *zfs) ListVolumes() ([]Volume, error) {
 
 // activateVolume activates a ZFS volume if not already active. Returns true if activated, false if not.
 func (d *zfs) activateVolume(vol Volume) (bool, error) {
-	if vol.contentType != ContentTypeBlock && !vol.IsBlockBacked() {
+	if !IsContentBlock(vol.contentType) && !vol.IsBlockBacked() {
 		return false, nil // Nothing to do for non-block or non-block backed volumes.
 	}
 
@@ -1918,7 +1951,7 @@ func (d *zfs) deactivateVolume(vol Volume) (bool, error) {
 
 		// We cannot wait longer than the operationlock.TimeoutShutdown to avoid continuing
 		// the unmount process beyond the ongoing request.
-		waitDuration := operationlock.TimeoutShutdown
+		waitDuration := time.Minute * 5
 		waitUntil := time.Now().Add(waitDuration)
 		i := 0
 		for {
@@ -1980,8 +2013,20 @@ func (d *zfs) MountVolume(vol Volume, op *operations.Operation) error {
 				return err
 			}
 
+			var volOptions []string
+
+			props, _ := d.getDatasetProperties(dataset, "atime", "relatime")
+
+			if props["atime"] == "off" {
+				volOptions = append(volOptions, "noatime")
+			} else if props["relatime"] == "off" {
+				volOptions = append(volOptions, "strictatime")
+			}
+
+			mountFlags, mountOptions := filesystem.ResolveMountOptions(volOptions)
+
 			// Mount the dataset.
-			err = TryMount(dataset, mountPath, "zfs", 0, "")
+			err = TryMount(dataset, mountPath, "zfs", mountFlags, mountOptions)
 			if err != nil {
 				return err
 			}
@@ -1999,7 +2044,7 @@ func (d *zfs) MountVolume(vol Volume, op *operations.Operation) error {
 			revert.Add(func() { _, _ = d.deactivateVolume(vol) })
 		}
 
-		if vol.contentType != ContentTypeBlock && d.isBlockBacked(vol) && !filesystem.IsMountPoint(mountPath) {
+		if !IsContentBlock(vol.contentType) && d.isBlockBacked(vol) && !filesystem.IsMountPoint(mountPath) {
 			volPath, err := d.GetVolumeDiskPath(vol)
 			if err != nil {
 				return err
@@ -2181,6 +2226,7 @@ func (d *zfs) MigrateVolume(vol Volume, conn io.ReadWriteCloser, volSrcArgs *mig
 	// Handle simple rsync and block_and_rsync through generic.
 	if volSrcArgs.MigrationType.FSType == migration.MigrationFSType_RSYNC || volSrcArgs.MigrationType.FSType == migration.MigrationFSType_BLOCK_AND_RSYNC {
 		// If volume is filesystem type, create a fast snapshot to ensure migration is consistent.
+		// TODO add support for temporary snapshots of block volumes here.
 		if vol.contentType == ContentTypeFS && !vol.IsSnapshot() {
 			snapshotPath, cleanup, err := d.readonlySnapshot(vol)
 			if err != nil {
@@ -3158,11 +3204,10 @@ func (d *zfs) FillVolumeConfig(vol Volume) error {
 		return err
 	}
 
-	// Only validate filesystem config keys for filesystem volumes or VM block volumes (which have an
-	// associated filesystem volume).
-	if d.isBlockBacked(vol) && vol.ContentType() == ContentTypeFS || vol.IsVMBlock() {
+	// Only validate filesystem config keys for filesystem volumes.
+	if d.isBlockBacked(vol) && vol.ContentType() == ContentTypeFS {
 		// Inherit block mode from pool if not set.
-		if d.isBlockBacked(vol) && vol.ContentType() == ContentTypeFS && vol.config["zfs.block_mode"] == "" {
+		if vol.config["zfs.block_mode"] == "" {
 			vol.config["zfs.block_mode"] = d.config["volume.zfs.block_mode"]
 		}
 

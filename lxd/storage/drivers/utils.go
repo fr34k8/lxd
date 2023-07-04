@@ -3,6 +3,7 @@ package drivers
 import (
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -677,24 +678,24 @@ func BTRFSSubVolumesGet(path string) ([]string, error) {
 		path = path + "/"
 	}
 
-	// Unprivileged users can't get to fs internals
-	_ = filepath.Walk(path, func(fpath string, fi os.FileInfo, err error) error {
+	// Unprivileged users can't get to fs internals.
+	_ = filepath.WalkDir(path, func(fpath string, entry fs.DirEntry, err error) error {
 		// Skip walk errors
 		if err != nil {
 			return nil
 		}
 
-		// Ignore the base path
+		// Ignore the base path.
 		if strings.TrimRight(fpath, "/") == strings.TrimRight(path, "/") {
 			return nil
 		}
 
-		// Subvolumes can only be directories
-		if !fi.IsDir() {
+		// Subvolumes can only be directories.
+		if !entry.IsDir() {
 			return nil
 		}
 
-		// Check if a btrfs subvolume
+		// Check if a btrfs subvolume.
 		if btrfsIsSubVolume(fpath) {
 			result = append(result, strings.TrimPrefix(fpath, path))
 		}
@@ -705,6 +706,7 @@ func BTRFSSubVolumesGet(path string) ([]string, error) {
 	return result, nil
 }
 
+// Deprecated: Use IsSubvolume from the Btrfs driver instead.
 // btrfsIsSubvolume checks if a given path is a subvolume.
 func btrfsIsSubVolume(subvolPath string) bool {
 	fs := unix.Stat_t{}
@@ -792,26 +794,25 @@ func OperationLockName(operationName string, poolName string, volType VolumeType
 	return fmt.Sprintf("%s/%s/%s/%s/%s", operationName, poolName, volType, contentType, volName)
 }
 
-// loopFileSizeDefault returns the size in Gigabytes to use as the default size for a pool loop file.
-// This is based on the free space available in LXD's VarPath().
+// loopFileSizeDefault returns the size in GiB to use as the default size for a pool loop file.
+// This is based on the size of the filesystem of LXD's VarPath().
 func loopFileSizeDefault() (uint64, error) {
 	st := unix.Statfs_t{}
 	err := unix.Statfs(shared.VarPath(), &st)
 	if err != nil {
-		return 0, fmt.Errorf("Couldn't statfs %q: %w", shared.VarPath(), err)
+		return 0, fmt.Errorf("Failed getting free space of %q: %w", shared.VarPath(), err)
 	}
 
-	/* choose 5 GiB < x < 30GiB, where x is 20% of the disk size */
-	defaultSize := uint64(st.Frsize) * st.Blocks / (1024 * 1024 * 1024) / 5
-	if defaultSize > 30 {
-		defaultSize = 30
+	gibAvailable := uint64(st.Frsize) * st.Bavail / (1024 * 1024 * 1024)
+	if gibAvailable > 30 {
+		return 30, nil // Default to no more than 30GiB.
+	} else if gibAvailable > 5 {
+		return gibAvailable / 5, nil // Use 20% of free space otherwise.
+	} else if gibAvailable == 5 {
+		return gibAvailable, nil // Need at least 5GiB free.
 	}
 
-	if defaultSize < 5 {
-		defaultSize = 5
-	}
-
-	return defaultSize, nil
+	return 0, fmt.Errorf("Insufficient free space to create default sized 5GiB pool")
 }
 
 // loopFileSetup sets up a loop device for the provided sourcePath.
@@ -862,11 +863,16 @@ func wipeBlockHeaders(path string) error {
 
 	defer fdDisk.Close()
 
-	// Wipe the 4MB header.
+	// Wipe the 4MiB header.
 	_, err = io.CopyN(fdDisk, fdZero, 1024*1024*4)
 	if err != nil {
 		return err
 	}
 
 	return nil
+}
+
+// IsContentBlock returns true if the content type is either block or iso.
+func IsContentBlock(contentType ContentType) bool {
+	return contentType == ContentTypeBlock || contentType == ContentTypeISO
 }

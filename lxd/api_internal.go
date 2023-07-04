@@ -5,7 +5,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -180,7 +179,7 @@ func internalCreateWarning(d *Daemon, r *http.Request) response.Response {
 		return response.SmartError(fmt.Errorf("Invalid entity type"))
 	}
 
-	err = d.db.Cluster.UpsertWarning(req.Location, req.Project, req.EntityTypeCode, req.EntityID, warningtype.Type(req.TypeCode), req.Message)
+	err = d.State().DB.Cluster.UpsertWarning(req.Location, req.Project, req.EntityTypeCode, req.EntityID, warningtype.Type(req.TypeCode), req.Message)
 	if err != nil {
 		return response.SmartError(fmt.Errorf("Failed to create warning: %w", err))
 	}
@@ -220,7 +219,7 @@ func internalRefreshImage(d *Daemon, r *http.Request) response.Response {
 
 func internalWaitReady(d *Daemon, r *http.Request) response.Response {
 	// Check that we're not shutting down.
-	isClosing := d.shutdownCtx.Err() != nil
+	isClosing := d.State().ShutdownCtx.Err() != nil
 	if isClosing {
 		return response.Unavailable(fmt.Errorf("LXD daemon is shutting down"))
 	}
@@ -236,7 +235,7 @@ func internalShutdown(d *Daemon, r *http.Request) response.Response {
 	force := queryParam(r, "force")
 	logger.Info("Asked to shutdown by API", logger.Ctx{"force": force})
 
-	if d.shutdownCtx.Err() != nil {
+	if d.State().ShutdownCtx.Err() != nil {
 		return response.SmartError(fmt.Errorf("Shutdown already in progress"))
 	}
 
@@ -415,6 +414,8 @@ type internalSQLResult struct {
 
 // Perform a database dump.
 func internalSQLGet(d *Daemon, r *http.Request) response.Response {
+	s := d.State()
+
 	database := r.FormValue("database")
 
 	if !shared.StringInSlice(database, []string{"local", "global"}) {
@@ -429,9 +430,9 @@ func internalSQLGet(d *Daemon, r *http.Request) response.Response {
 
 	var db *sql.DB
 	if database == "global" {
-		db = d.db.Cluster.DB()
+		db = s.DB.Cluster.DB()
 	} else {
-		db = d.db.Node.DB()
+		db = s.DB.Node.DB()
 	}
 
 	tx, err := db.BeginTx(r.Context(), nil)
@@ -451,6 +452,8 @@ func internalSQLGet(d *Daemon, r *http.Request) response.Response {
 
 // Execute queries.
 func internalSQLPost(d *Daemon, r *http.Request) response.Response {
+	s := d.State()
+
 	req := &internalSQLQuery{}
 	// Parse the request.
 	err := json.NewDecoder(r.Body).Decode(&req)
@@ -468,9 +471,9 @@ func internalSQLPost(d *Daemon, r *http.Request) response.Response {
 
 	var db *sql.DB
 	if req.Database == "global" {
-		db = d.db.Cluster.DB()
+		db = s.DB.Cluster.DB()
 	} else {
-		db = d.db.Node.DB()
+		db = s.DB.Node.DB()
 	}
 
 	batch := internalSQLBatch{}
@@ -579,12 +582,10 @@ func internalSQLExec(tx *sql.Tx, query string, result *internalSQLResult) error 
 
 // internalImportFromBackup creates instance, storage pool and volume DB records from an instance's backup file.
 // It expects the instance volume to be mounted so that the backup.yaml file is readable.
-func internalImportFromBackup(d *Daemon, projectName string, instName string, force bool, allowNameOverride bool) error {
+func internalImportFromBackup(s *state.State, projectName string, instName string, allowNameOverride bool) error {
 	if instName == "" {
 		return fmt.Errorf("The name of the instance is required")
 	}
-
-	s := d.State()
 
 	storagePoolsPath := shared.VarPath("storage-pools")
 	storagePoolsDir, err := os.Open(storagePoolsPath)
@@ -692,19 +693,15 @@ func internalImportFromBackup(d *Daemon, projectName string, instName string, fo
 		return fmt.Errorf(`The storage pool's %q driver %q conflicts with the driver %q recorded in the instance's backup file`, instancePoolName, pool.Driver().Info().Name, backupConf.Pool.Driver)
 	}
 
-	// Check snapshots are consistent, and if not, if req.Force is true, then delete snapshots that do not exist in backup.yaml.
-	existingSnapshots, err := pool.CheckInstanceBackupFileSnapshots(backupConf, projectName, force, nil)
+	// Check snapshots are consistent.
+	existingSnapshots, err := pool.CheckInstanceBackupFileSnapshots(backupConf, projectName, false, nil)
 	if err != nil {
-		if errors.Is(err, storagePools.ErrBackupSnapshotsMismatch) {
-			return fmt.Errorf(`%s. Set "force" to discard non-existing snapshots`, err)
-		}
-
-		return fmt.Errorf("Checking snapshots: %w", err)
+		return fmt.Errorf("Failed checking snapshots: %w", err)
 	}
 
 	// Check if a storage volume entry for the instance already exists.
 	var dbVolume *db.StorageVolume
-	err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 		dbVolume, err = tx.GetStoragePoolVolume(ctx, pool.ID(), projectName, instanceDBVolType, backupConf.Container.Name, true)
 		if err != nil && !response.IsNotFoundError(err) {
 			return err
@@ -716,20 +713,18 @@ func internalImportFromBackup(d *Daemon, projectName string, instName string, fo
 		return err
 	}
 
-	// If a storage volume entry exists only proceed if force was specified.
-	if dbVolume != nil && !force {
-		return fmt.Errorf(`Storage volume for instance %q already exists in the database. Set "force" to overwrite`, backupConf.Container.Name)
+	if dbVolume != nil {
+		return fmt.Errorf(`Storage volume for instance %q already exists in the database`, backupConf.Container.Name)
 	}
 
 	// Check if an entry for the instance already exists in the db.
-	_, instanceErr := d.db.Cluster.GetInstanceID(projectName, backupConf.Container.Name)
-	if instanceErr != nil && !response.IsNotFoundError(instanceErr) {
-		return instanceErr
+	_, err = s.DB.Cluster.GetInstanceID(projectName, backupConf.Container.Name)
+	if err != nil && !response.IsNotFoundError(err) {
+		return err
 	}
 
-	// If a db entry exists only proceed if force was specified.
-	if instanceErr == nil && !force {
-		return fmt.Errorf(`Entry for instance %q already exists in the database. Set "force" to overwrite`, backupConf.Container.Name)
+	if err == nil {
+		return fmt.Errorf(`Entry for instance %q already exists in the database`, backupConf.Container.Name)
 	}
 
 	if backupConf.Volume == nil {
@@ -746,15 +741,7 @@ func internalImportFromBackup(d *Daemon, projectName string, instName string, fo
 		}
 
 		// Remove the storage volume db entry for the instance since force was specified.
-		err := d.db.Cluster.RemoveStoragePoolVolume(projectName, backupConf.Container.Name, instanceDBVolType, pool.ID())
-		if err != nil {
-			return err
-		}
-	}
-
-	if instanceErr == nil {
-		// Remove the storage volume db entry for the instance since force was specified.
-		err := d.db.Cluster.DeleteInstance(projectName, backupConf.Container.Name)
+		err := s.DB.Cluster.RemoveStoragePoolVolume(projectName, backupConf.Container.Name, instanceDBVolType, pool.ID())
 		if err != nil {
 			return err
 		}
@@ -811,19 +798,18 @@ func internalImportFromBackup(d *Daemon, projectName string, instName string, fo
 		snapInstName := fmt.Sprintf("%s%s%s", backupConf.Container.Name, shared.SnapshotDelimiter, snap.Name)
 
 		// Check if an entry for the snapshot already exists in the db.
-		_, snapErr := d.db.Cluster.GetInstanceSnapshotID(projectName, backupConf.Container.Name, snap.Name)
+		_, snapErr := s.DB.Cluster.GetInstanceSnapshotID(projectName, backupConf.Container.Name, snap.Name)
 		if snapErr != nil && !response.IsNotFoundError(snapErr) {
 			return snapErr
 		}
 
-		// If a db entry exists only proceed if force was specified.
-		if snapErr == nil && !force {
-			return fmt.Errorf(`Entry for snapshot %q already exists in the database. Set "force" to overwrite`, snapInstName)
+		if snapErr == nil {
+			return fmt.Errorf(`Entry for snapshot %q already exists in the database`, snapInstName)
 		}
 
 		// Check if a storage volume entry for the snapshot already exists.
 		var dbVolume *db.StorageVolume
-		err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 			dbVolume, err = tx.GetStoragePoolVolume(ctx, pool.ID(), projectName, instanceDBVolType, snapInstName, true)
 			if err != nil && !response.IsNotFoundError(err) {
 				return err
@@ -836,19 +822,19 @@ func internalImportFromBackup(d *Daemon, projectName string, instName string, fo
 		}
 
 		// If a storage volume entry exists only proceed if force was specified.
-		if dbVolume != nil && !force {
-			return fmt.Errorf(`Storage volume for snapshot %q already exists in the database. Set "force" to overwrite`, snapInstName)
+		if dbVolume != nil {
+			return fmt.Errorf(`Storage volume for snapshot %q already exists in the database`, snapInstName)
 		}
 
 		if snapErr == nil {
-			err := d.db.Cluster.DeleteInstance(projectName, snapInstName)
+			err := s.DB.Cluster.DeleteInstance(projectName, snapInstName)
 			if err != nil {
 				return err
 			}
 		}
 
 		if dbVolume != nil {
-			err := d.db.Cluster.RemoveStoragePoolVolume(projectName, snapInstName, instanceDBVolType, pool.ID())
+			err := s.DB.Cluster.RemoveStoragePoolVolume(projectName, snapInstName, instanceDBVolType, pool.ID())
 			if err != nil {
 				return err
 			}

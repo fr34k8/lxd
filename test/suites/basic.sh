@@ -151,10 +151,41 @@ test_basic_usage() {
   # change the container filesystem so the resulting image is different
   lxc exec baz touch /somefile
   lxc stop baz --force
-  # publishing another image with same alias doesn't fail
-  lxc publish baz --alias=foo-image
+  # publishing another image with same alias should fail
+  ! lxc publish baz --alias=foo-image || false
+  # publishing another image with same alias and '--reuse' flag should success
+  lxc publish baz --alias=foo-image --reuse
+  fooImage=$(lxc image list -cF -fcsv foo-image)
+  fooImage2=$(lxc image list -cF -fcsv foo-image2)
   lxc delete baz
   lxc image delete foo-image foo-image2
+
+  # the first image should have foo-image2 alias and the second imgae foo-image alias
+  if [ "$fooImage" = "$fooImage2" ]; then
+    echo "foo-image and foo-image2 aliases should be assigned to two different images"
+    false
+  fi
+
+
+  # Test container publish with existing alias
+  lxc publish bar --alias=foo-image --alias=foo-image2
+  lxc launch testimage baz
+  # change the container filesystem so the resulting image is different
+  lxc exec baz touch /somefile
+  lxc stop baz --force
+  # publishing another image with same aliases
+  lxc publish baz --alias=foo-image --alias=foo-image2 --reuse
+  fooImage=$(lxc image list -cF -fcsv foo-image)
+  fooImage2=$(lxc image list -cF -fcsv foo-image2)
+  lxc delete baz
+  lxc image delete foo-image
+
+  # the second image should have foo-image and foo-image2 aliases and the first one should be removed
+  if [ "$fooImage" != "$fooImage2" ]; then
+    echo "foo-image and foo-image2 aliases should be assigned to the same image"
+    false
+  fi
+
 
   # Test image compression on publish
   lxc publish bar --alias=foo-image-compressed --compression=bzip2 prop=val1
@@ -360,7 +391,7 @@ test_basic_usage() {
   lxc launch testimage test-limits -t c0.5-m0.2
   [ "$(lxc config get test-limits limits.cpu)" = "1" ]
   [ "$(lxc config get test-limits limits.cpu.allowance)" = "50%" ]
-  [ "$(lxc config get test-limits limits.memory)" = "204MB" ]
+  [ "$(lxc config get test-limits limits.memory)" = "204MiB" ]
   lxc delete -f test-limits
 
   # Test last_used_at field is working properly
@@ -587,4 +618,40 @@ test_basic_usage() {
   lxc storage volume delete bla vol1
   lxc storage volume delete bla vol2
   lxc storage delete bla
+
+  # Test rebuilding an instance with its original image.
+  lxc init testimage c1
+  lxc start c1
+  lxc exec c1 -- touch /data.txt
+  lxc stop c1
+  lxc rebuild testimage c1
+  lxc start c1
+  ! lxc exec c1 -- stat /data.txt || false
+  lxc delete c1 -f
+
+  # Test a forced rebuild
+  lxc launch testimage c1
+  ! lxc rebuild testimage c1 || false
+  lxc rebuild testimage c1 --force
+  lxc delete c1 -f
+
+  # Test rebuilding an instance with a new image.
+  lxc init c1 --empty
+  lxc remote add l1 "${LXD_ADDR}" --accept-certificate --password foo
+  lxc rebuild l1:testimage c1
+  lxc start c1
+  lxc delete c1 -f
+  lxc remote remove l1
+
+  # Test rebuilding an instance with an empty file system.
+  lxc init testimage c1
+  lxc rebuild c1 --empty
+  lxc delete c1 -f
+
+  # Test assigning an empty profile (with no root disk device) to an instance.
+  lxc init testimage c1
+  lxc profile create foo
+  ! lxc profile assign c1 foo || false
+  lxc profile delete foo
+  lxc delete -f c1
 }

@@ -18,7 +18,7 @@ See {ref}`storage-volumes` for detailed information.
 
 ### Create the volume
 
-Use the following command to create a custom storage volume in a storage pool:
+Use the following command to create a custom storage volume of type `block` or `filesystem` in a storage pool:
 
     lxc storage volume create <pool_name> <volume_name> [configuration_options...]
 
@@ -38,6 +38,10 @@ For most storage drivers, custom storage volumes are not replicated across the c
 This behavior is different for Ceph-based storage pools (`ceph` and `cephfs`), where volumes are available from any cluster member.
 ```
 
+To create a custom storage volume of type `iso`, use the `import` command instead of the `create` command:
+
+    lxc storage volume import <pool_name> <iso_path> <volume_name> --type=iso
+
 (storage-attach-volume)=
 ### Attach the volume to an instance
 
@@ -45,8 +49,9 @@ After creating a custom storage volume, you can add it to one or more instances 
 
 The following restrictions apply:
 
-- Custom storage volumes of {ref}`content type <storage-content-types>` `block` cannot be attached to containers, but only to virtual machines.
+- Custom storage volumes of {ref}`content type <storage-content-types>` `block` or `iso` cannot be attached to containers, but only to virtual machines.
 - To avoid data corruption, storage volumes of {ref}`content type <storage-content-types>` `block` should never be attached to more than one virtual machine at a time.
+- Storage volumes of {ref}`content type <storage-content-types>` `iso` are always read-only, and can therefore be attached to more than one virtual machine at a time without corrupting data.
 
 For custom storage volumes with the content type `filesystem`, use the following command, where `<location>` is the path for accessing the storage volume inside the instance (for example, `/data`):
 
@@ -61,6 +66,16 @@ If you want to use a different device name, you can add it to the command:
 
     lxc storage volume attach <pool_name> <filesystem_volume_name> <instance_name> <device_name> <location>
     lxc storage volume attach <pool_name> <block_volume_name> <instance_name> <device_name>
+
+#### Attach the volume as a device
+
+The `lxc storage volume attach` command is a shortcut for adding a disk device to an instance.
+Alternatively, you can add a disk device for the storage volume in the usual way:
+
+    lxc config device add <instance_name> <device_name> disk pool=<pool_name> source=<volume_name> [path=<location>]
+
+When using this way, you can add further configuration to the command if needed.
+See {ref}`disk device <devices-disk>` for all available device options.
 
 (storage-configure-IO)=
 #### Configure I/O limits

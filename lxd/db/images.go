@@ -600,7 +600,7 @@ WHERE images.fingerprint = ?
 	}
 
 	if len(addresses) == 0 {
-		return "", fmt.Errorf("Image not available on any online node")
+		return "", fmt.Errorf("Image not available on any online member")
 	}
 
 	for _, address := range addresses {
@@ -815,12 +815,9 @@ func (c *Cluster) CopyDefaultImageProfiles(id int, newID int) error {
 
 // UpdateImageLastUseDate updates the last_use_date field of the image with the
 // given fingerprint.
-func (c *Cluster) UpdateImageLastUseDate(projectName string, fingerprint string, lastUsed time.Time) error {
+func (c *ClusterTx) UpdateImageLastUseDate(ctx context.Context, projectName string, fingerprint string, lastUsed time.Time) error {
 	stmt := `UPDATE images SET last_use_date=? WHERE fingerprint=? AND project_id = (SELECT id FROM projects WHERE name = ? LIMIT 1)`
-	err := c.Transaction(context.TODO(), func(ctx context.Context, tx *ClusterTx) error {
-		_, err := tx.tx.Exec(stmt, lastUsed, fingerprint, projectName)
-		return err
-	})
+	_, err := c.tx.ExecContext(ctx, stmt, lastUsed, fingerprint, projectName)
 	return err
 }
 
@@ -954,15 +951,18 @@ func (c *Cluster) CreateImage(project string, fp string, fname string, sz int64,
 		sql := `INSERT INTO images (project_id, fingerprint, filename, size, public, auto_update, architecture, creation_date, expiry_date, upload_date, type) VALUES ((SELECT id FROM projects WHERE name = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 		result, err := tx.tx.Exec(sql, imageProject, fp, fname, sz, publicInt, autoUpdateInt, arch, createdAt, expiresAt, time.Now().UTC(), imageType)
 		if err != nil {
-			return err
+			return fmt.Errorf("Failed saving main image record: %w", err)
 		}
 
-		id64, err := result.LastInsertId()
-		if err != nil {
-			return err
-		}
+		var id int
+		{
+			id64, err := result.LastInsertId()
+			if err != nil {
+				return fmt.Errorf("Failed getting image ID: %w", err)
+			}
 
-		id := int(id64)
+			id = int(id64)
+		}
 
 		if len(properties) > 0 {
 			sql = `INSERT INTO images_properties (image_id, type, key, value) VALUES (?, 0, ?, ?)`
@@ -971,7 +971,7 @@ func (c *Cluster) CreateImage(project string, fp string, fname string, sz int64,
 				// value per key
 				_, err = tx.tx.Exec(sql, id, k, v)
 				if err != nil {
-					return err
+					return fmt.Errorf("Failed saving image properties %d: %w", id, err)
 				}
 			}
 		}
@@ -981,7 +981,7 @@ func (c *Cluster) CreateImage(project string, fp string, fname string, sz int64,
 			for _, profileID := range profileIds {
 				_, err = tx.tx.Exec(sql, id, profileID)
 				if err != nil {
-					return err
+					return fmt.Errorf("Failed saving image profiles: %w", err)
 				}
 			}
 		} else {
@@ -996,7 +996,7 @@ func (c *Cluster) CreateImage(project string, fp string, fname string, sz int64,
 
 			_, err = tx.tx.Exec("INSERT INTO images_profiles(image_id, profile_id) VALUES(?, ?)", id, dbProfiles[0].ID)
 			if err != nil {
-				return err
+				return fmt.Errorf("Failed saving image prfofiles: %w", err)
 			}
 		}
 
@@ -1021,7 +1021,7 @@ func (c *Cluster) CreateImage(project string, fp string, fname string, sz int64,
 
 		_, err = tx.tx.Exec("INSERT INTO images_nodes(image_id, node_id) VALUES(?, ?)", id, c.nodeID)
 		if err != nil {
-			return err
+			return fmt.Errorf("Failed saving image member info: %w", err)
 		}
 
 		return nil

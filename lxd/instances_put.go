@@ -16,6 +16,7 @@ import (
 	"github.com/lxc/lxd/lxd/response"
 	"github.com/lxc/lxd/shared"
 	"github.com/lxc/lxd/shared/api"
+	"github.com/lxc/lxd/shared/version"
 )
 
 func coalesceErrors(local bool, errors map[string]error) error {
@@ -77,7 +78,9 @@ func instancesPut(d *Daemon, r *http.Request) response.Response {
 	// Don't mess with instances while in setup mode.
 	<-d.waitReady.Done()
 
-	c, err := instance.LoadNodeAll(d.State(), instancetype.Any)
+	s := d.State()
+
+	c, err := instance.LoadNodeAll(s, instancetype.Any)
 	if err != nil {
 		return response.BadRequest(err)
 	}
@@ -168,7 +171,7 @@ func instancesPut(d *Daemon, r *http.Request) response.Response {
 		}
 
 		// Check if clustered.
-		clustered, err := cluster.Enabled(d.db.Node)
+		clustered, err := cluster.Enabled(s.DB.Node)
 		if err != nil {
 			return err
 		}
@@ -180,7 +183,7 @@ func instancesPut(d *Daemon, r *http.Request) response.Response {
 
 		// Get all members in cluster.
 		var members []db.NodeInfo
-		err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 			var err error
 
 			members, err = tx.GetNodes(ctx)
@@ -195,14 +198,14 @@ func instancesPut(d *Daemon, r *http.Request) response.Response {
 		}
 
 		// Get local cluster address.
-		localClusterAddress := d.State().LocalConfig.ClusterAddress()
+		localClusterAddress := s.LocalConfig.ClusterAddress()
 
 		// Record the results.
 		failures := map[string]error{}
 		failuresLock := sync.Mutex{}
 		wgAction := sync.WaitGroup{}
 
-		networkCert := d.endpoints.NetworkCert()
+		networkCert := s.Endpoints.NetworkCert()
 		for _, member := range members {
 			wgAction.Add(1)
 			go func(member db.NodeInfo) {
@@ -221,7 +224,7 @@ func instancesPut(d *Daemon, r *http.Request) response.Response {
 				}
 
 				// Connect to the remote server.
-				client, err := cluster.Connect(member.Address, networkCert, d.serverCert(), r, true)
+				client, err := cluster.Connect(member.Address, networkCert, s.ServerCert(), r, true)
 				if err != nil {
 					failuresLock.Lock()
 					failures[member.Name] = err
@@ -254,9 +257,12 @@ func instancesPut(d *Daemon, r *http.Request) response.Response {
 		return coalesceErrors(true, failures)
 	}
 
-	resources := map[string][]string{}
-	resources["instances"] = names
-	op, err := operations.OperationCreate(d.State(), projectName, operations.OperationClassTask, opType, resources, nil, do, nil, nil, r)
+	resources := map[string][]api.URL{}
+	for _, instName := range names {
+		resources["instances"] = append(resources["instances"], *api.NewURL().Path(version.APIVersion, "instances", instName))
+	}
+
+	op, err := operations.OperationCreate(s, projectName, operations.OperationClassTask, opType, resources, nil, do, nil, nil, r)
 	if err != nil {
 		return response.InternalError(err)
 	}

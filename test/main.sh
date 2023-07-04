@@ -83,11 +83,15 @@ cleanup() {
     read -r _
   fi
 
-  echo "==> Cleaning up"
+  if [ -n "${GITHUB_ACTIONS:-}" ]; then
+    echo "==> Skipping cleanup (GitHub Action runner detected)"
+  else
+    echo "==> Cleaning up"
 
-  umount -l "${TEST_DIR}/dev"
-  kill_external_auth_daemon "$TEST_DIR"
-  cleanup_lxds "$TEST_DIR"
+    umount -l "${TEST_DIR}/dev"
+    kill_external_auth_daemon "$TEST_DIR"
+    cleanup_lxds "$TEST_DIR"
+  fi
 
   echo ""
   echo ""
@@ -113,7 +117,7 @@ TEST_DIR=$(mktemp -d -p "$(pwd)" tmp.XXX)
 chmod +x "${TEST_DIR}"
 
 if [ -n "${LXD_TMPFS:-}" ]; then
-  mount -t tmpfs tmpfs "${TEST_DIR}" -o mode=0751
+  mount -t tmpfs tmpfs "${TEST_DIR}" -o mode=0751 -o size=6G
 fi
 
 mkdir -p "${TEST_DIR}/dev"
@@ -226,6 +230,7 @@ if [ "${1:-"all"}" != "standalone" ]; then
     run_test test_clustering_image_refresh "clustering image refresh"
     run_test test_clustering_evacuation "clustering evacuation"
     run_test test_clustering_instance_placement_scriptlet "clustering instance placement scriptlet"
+    run_test test_clustering_move "clustering move"
     run_test test_clustering_edit_configuration "clustering config edit"
     run_test test_clustering_remove_members "clustering config remove members"
     run_test test_clustering_autotarget "clustering autotarget member"
@@ -318,6 +323,7 @@ if [ "${1:-"all"}" != "cluster" ]; then
     run_test test_storage_driver_cephfs "cephfs storage driver"
     run_test test_storage_driver_zfs "zfs storage driver"
     run_test test_storage_buckets "storage buckets"
+    run_test test_storage_volume_import "storage volume import"
     run_test test_resources "resources"
     run_test test_kernel_limits "kernel limits"
     run_test test_macaroon_auth "macaroon authentication"

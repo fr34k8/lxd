@@ -16,14 +16,15 @@ import (
 	"github.com/lxc/lxd/lxd/db/cluster"
 	"github.com/lxc/lxd/lxd/db/operationtype"
 	"github.com/lxc/lxd/lxd/db/warningtype"
-	"github.com/lxc/lxd/lxd/filter"
 	"github.com/lxc/lxd/lxd/lifecycle"
 	"github.com/lxc/lxd/lxd/operations"
 	"github.com/lxc/lxd/lxd/project"
 	"github.com/lxc/lxd/lxd/request"
 	"github.com/lxc/lxd/lxd/response"
+	"github.com/lxc/lxd/lxd/state"
 	"github.com/lxc/lxd/lxd/task"
 	"github.com/lxc/lxd/shared/api"
+	"github.com/lxc/lxd/shared/filter"
 	"github.com/lxc/lxd/shared/logger"
 	"github.com/lxc/lxd/shared/version"
 )
@@ -43,18 +44,23 @@ var warningCmd = APIEndpoint{
 	Delete: APIEndpointAction{Handler: warningDelete},
 }
 
-func filterWarnings(warnings []api.Warning, clauses []filter.Clause) []api.Warning {
+func filterWarnings(warnings []api.Warning, clauses *filter.ClauseSet) ([]api.Warning, error) {
 	filtered := []api.Warning{}
 
 	for _, warning := range warnings {
-		if !filter.Match(warning, clauses) {
+		match, err := filter.Match(warning, *clauses)
+		if err != nil {
+			return nil, err
+		}
+
+		if !match {
 			continue
 		}
 
 		filtered = append(filtered, warning)
 	}
 
-	return filtered
+	return filtered, nil
 }
 
 // swagger:operation GET /1.0/warnings warnings warnings_get
@@ -155,21 +161,17 @@ func warningsGet(d *Daemon, r *http.Request) response.Response {
 	}
 
 	// Parse filter value
-	var clauses []filter.Clause
-
 	filterStr := r.FormValue("filter")
-	if filterStr != "" {
-		clauses, err = filter.Parse(filterStr)
-		if err != nil {
-			return response.SmartError(fmt.Errorf("Failed to filter warnings: %w", err))
-		}
+	clauses, err := filter.Parse(filterStr, filter.QueryOperatorSet())
+	if err != nil {
+		return response.SmartError(fmt.Errorf("Failed to filter warnings: %w", err))
 	}
 
 	// Parse the project field
 	projectName := queryParam(r, "project")
 
 	var warnings []api.Warning
-	err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+	err = d.State().DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 		filters := []cluster.WarningFilter{}
 		if projectName != "" {
 			filter := cluster.WarningFilter{Project: &projectName}
@@ -198,10 +200,16 @@ func warningsGet(d *Daemon, r *http.Request) response.Response {
 		return response.SmartError(err)
 	}
 
+	var filters []api.Warning
 	if recursion == 0 {
 		var resultList []string
 
-		for _, w := range filterWarnings(warnings, clauses) {
+		filters, err = filterWarnings(warnings, clauses)
+		if err != nil {
+			return response.SmartError(err)
+		}
+
+		for _, w := range filters {
 			url := fmt.Sprintf("/%s/warnings/%s", version.APIVersion, w.UUID)
 			resultList = append(resultList, url)
 		}
@@ -209,8 +217,15 @@ func warningsGet(d *Daemon, r *http.Request) response.Response {
 		return response.SyncResponse(true, resultList)
 	}
 
+	if filters == nil {
+		filters, err = filterWarnings(warnings, clauses)
+		if err != nil {
+			return response.SmartError(err)
+		}
+	}
+
 	// Return detailed list of warning
-	return response.SyncResponse(true, filterWarnings(warnings, clauses))
+	return response.SyncResponse(true, filters)
 }
 
 // swagger:operation GET /1.0/warnings/{uuid} warnings warning_get
@@ -254,7 +269,7 @@ func warningGet(d *Daemon, r *http.Request) response.Response {
 	}
 
 	var resp api.Warning
-	err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+	err = d.State().DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 		dbWarning, err := cluster.GetWarning(ctx, tx.Tx(), id)
 		if err != nil {
 			return err
@@ -335,6 +350,8 @@ func warningPatch(d *Daemon, r *http.Request) response.Response {
 //	  "500":
 //	    $ref: "#/responses/InternalServerError"
 func warningPut(d *Daemon, r *http.Request) response.Response {
+	s := d.State()
+
 	id, err := url.PathUnescape(mux.Vars(r)["id"])
 	if err != nil {
 		return response.SmartError(err)
@@ -358,7 +375,7 @@ func warningPut(d *Daemon, r *http.Request) response.Response {
 		return response.Forbidden(fmt.Errorf(`Status may only be set to "acknowledge" or "new"`))
 	}
 
-	err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 		err := tx.UpdateWarningStatus(id, status)
 		if err != nil {
 			return err
@@ -371,9 +388,9 @@ func warningPut(d *Daemon, r *http.Request) response.Response {
 	}
 
 	if status == warningtype.StatusAcknowledged {
-		d.State().Events.SendLifecycle(project.Default, lifecycle.WarningAcknowledged.Event(id, request.CreateRequestor(r), nil))
+		s.Events.SendLifecycle(project.Default, lifecycle.WarningAcknowledged.Event(id, request.CreateRequestor(r), nil))
 	} else {
-		d.State().Events.SendLifecycle(project.Default, lifecycle.WarningReset.Event(id, request.CreateRequestor(r), nil))
+		s.Events.SendLifecycle(project.Default, lifecycle.WarningReset.Event(id, request.CreateRequestor(r), nil))
 	}
 
 	return response.EmptySyncResponse
@@ -394,12 +411,14 @@ func warningPut(d *Daemon, r *http.Request) response.Response {
 //	  "500":
 //	    $ref: "#/responses/InternalServerError"
 func warningDelete(d *Daemon, r *http.Request) response.Response {
+	s := d.State()
+
 	id, err := url.PathUnescape(mux.Vars(r)["id"])
 	if err != nil {
 		return response.SmartError(err)
 	}
 
-	err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 		err := cluster.DeleteWarning(ctx, tx.Tx(), id)
 		if err != nil {
 			return err
@@ -411,38 +430,46 @@ func warningDelete(d *Daemon, r *http.Request) response.Response {
 		return response.SmartError(err)
 	}
 
-	d.State().Events.SendLifecycle(project.Default, lifecycle.WarningDeleted.Event(id, request.CreateRequestor(r), nil))
+	s.Events.SendLifecycle(project.Default, lifecycle.WarningDeleted.Event(id, request.CreateRequestor(r), nil))
 
 	return response.EmptySyncResponse
 }
 
 func pruneResolvedWarningsTask(d *Daemon) (task.Func, task.Schedule) {
 	f := func(ctx context.Context) {
+		s := d.State()
+
 		opRun := func(op *operations.Operation) error {
-			return pruneResolvedWarnings(ctx, d)
+			return pruneResolvedWarnings(ctx, s)
 		}
 
-		op, err := operations.OperationCreate(d.State(), "", operations.OperationClassTask, operationtype.WarningsPruneResolved, nil, nil, opRun, nil, nil, nil)
+		op, err := operations.OperationCreate(s, "", operations.OperationClassTask, operationtype.WarningsPruneResolved, nil, nil, opRun, nil, nil, nil)
 		if err != nil {
-			logger.Error("Failed to start prune resolved warnings operation", logger.Ctx{"err": err})
+			logger.Error("Failed creating prune resolved warnings operation", logger.Ctx{"err": err})
 			return
 		}
 
 		logger.Info("Pruning resolved warnings")
 		err = op.Start()
 		if err != nil {
-			logger.Error("Failed to prune resolved warnings", logger.Ctx{"err": err})
+			logger.Error("Failed starting prune resolved warnings operation", logger.Ctx{"err": err})
+			return
 		}
 
-		_, _ = op.Wait(ctx)
+		err = op.Wait(ctx)
+		if err != nil {
+			logger.Error("Failed pruning resolved warnings", logger.Ctx{"err": err})
+			return
+		}
+
 		logger.Info("Done pruning resolved warnings")
 	}
 
 	return f, task.Daily()
 }
 
-func pruneResolvedWarnings(ctx context.Context, d *Daemon) error {
-	err := d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+func pruneResolvedWarnings(ctx context.Context, s *state.State) error {
+	err := s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 		// Retrieve warnings by resolved status.
 		statusResolved := warningtype.StatusResolved
 		filter := cluster.WarningFilter{

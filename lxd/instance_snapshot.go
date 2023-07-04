@@ -122,6 +122,8 @@ import (
 //	  "500":
 //	    $ref: "#/responses/InternalServerError"
 func instanceSnapshotsGet(d *Daemon, r *http.Request) response.Response {
+	s := d.State()
+
 	instanceType, err := urlInstanceTypeDetect(r)
 	if err != nil {
 		return response.SmartError(err)
@@ -138,7 +140,7 @@ func instanceSnapshotsGet(d *Daemon, r *http.Request) response.Response {
 	}
 
 	// Handle requests targeted to a container on a different node
-	resp, err := forwardedResponseIfInstanceIsRemote(d, r, projectName, cname, instanceType)
+	resp, err := forwardedResponseIfInstanceIsRemote(s, r, projectName, cname, instanceType)
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -152,7 +154,7 @@ func instanceSnapshotsGet(d *Daemon, r *http.Request) response.Response {
 	resultMap := []*api.InstanceSnapshot{}
 
 	if !recursion {
-		snaps, err := d.db.Cluster.GetInstanceSnapshotsNames(projectName, cname)
+		snaps, err := s.DB.Cluster.GetInstanceSnapshotsNames(projectName, cname)
 		if err != nil {
 			return response.SmartError(err)
 		}
@@ -168,7 +170,7 @@ func instanceSnapshotsGet(d *Daemon, r *http.Request) response.Response {
 			}
 		}
 	} else {
-		c, err := instance.LoadByProjectAndName(d.State(), projectName, cname)
+		c, err := instance.LoadByProjectAndName(s, projectName, cname)
 		if err != nil {
 			return response.SmartError(err)
 		}
@@ -179,7 +181,7 @@ func instanceSnapshotsGet(d *Daemon, r *http.Request) response.Response {
 		}
 
 		for _, snap := range snaps {
-			render, _, err := snap.Render(storagePools.RenderSnapshotUsage(d.State(), snap))
+			render, _, err := snap.Render(storagePools.RenderSnapshotUsage(s, snap))
 			if err != nil {
 				continue
 			}
@@ -228,6 +230,8 @@ func instanceSnapshotsGet(d *Daemon, r *http.Request) response.Response {
 //	  "500":
 //	    $ref: "#/responses/InternalServerError"
 func instanceSnapshotsPost(d *Daemon, r *http.Request) response.Response {
+	s := d.State()
+
 	instanceType, err := urlInstanceTypeDetect(r)
 	if err != nil {
 		return response.SmartError(err)
@@ -243,7 +247,7 @@ func instanceSnapshotsPost(d *Daemon, r *http.Request) response.Response {
 		return response.BadRequest(fmt.Errorf("Invalid instance name"))
 	}
 
-	err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 		dbProject, err := cluster.GetProject(context.Background(), tx.Tx(), projectName)
 		if err != nil {
 			return err
@@ -266,7 +270,7 @@ func instanceSnapshotsPost(d *Daemon, r *http.Request) response.Response {
 	}
 
 	// Handle requests targeted to a container on a different node
-	resp, err := forwardedResponseIfInstanceIsRemote(d, r, projectName, name, instanceType)
+	resp, err := forwardedResponseIfInstanceIsRemote(s, r, projectName, name, instanceType)
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -281,7 +285,7 @@ func instanceSnapshotsPost(d *Daemon, r *http.Request) response.Response {
 	 * 2. copy the database info over
 	 * 3. copy over the rootfs
 	 */
-	inst, err := instance.LoadByProjectAndName(d.State(), projectName, name)
+	inst, err := instance.LoadByProjectAndName(s, projectName, name)
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -293,7 +297,7 @@ func instanceSnapshotsPost(d *Daemon, r *http.Request) response.Response {
 	}
 
 	if req.Name == "" {
-		req.Name, err = instance.NextSnapshotName(d.State(), inst, "snap%d")
+		req.Name, err = instance.NextSnapshotName(s, inst, "snap%d")
 		if err != nil {
 			return response.SmartError(err)
 		}
@@ -320,14 +324,15 @@ func instanceSnapshotsPost(d *Daemon, r *http.Request) response.Response {
 		return inst.Snapshot(req.Name, expiry, req.Stateful)
 	}
 
-	resources := map[string][]string{}
-	resources["instances"] = []string{name}
+	resources := map[string][]api.URL{}
+	resources["instances"] = []api.URL{*api.NewURL().Path(version.APIVersion, "instances", name)}
+	resources["instances_snapshots"] = []api.URL{*api.NewURL().Path(version.APIVersion, "instances", name, "snapshots", req.Name)}
 
 	if inst.Type() == instancetype.Container {
 		resources["containers"] = resources["instances"]
 	}
 
-	op, err := operations.OperationCreate(d.State(), projectName, operations.OperationClassTask, operationtype.SnapshotCreate, resources, nil, snapshot, nil, nil, r)
+	op, err := operations.OperationCreate(s, projectName, operations.OperationClassTask, operationtype.SnapshotCreate, resources, nil, snapshot, nil, nil, r)
 	if err != nil {
 		return response.InternalError(err)
 	}
@@ -336,13 +341,15 @@ func instanceSnapshotsPost(d *Daemon, r *http.Request) response.Response {
 }
 
 func instanceSnapshotHandler(d *Daemon, r *http.Request) response.Response {
+	s := d.State()
+
 	instanceType, err := urlInstanceTypeDetect(r)
 	if err != nil {
 		return response.SmartError(err)
 	}
 
 	projectName := projectParam(r)
-	containerName, err := url.PathUnescape(mux.Vars(r)["name"])
+	instName, err := url.PathUnescape(mux.Vars(r)["name"])
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -352,7 +359,7 @@ func instanceSnapshotHandler(d *Daemon, r *http.Request) response.Response {
 		return response.SmartError(err)
 	}
 
-	resp, err := forwardedResponseIfInstanceIsRemote(d, r, projectName, containerName, instanceType)
+	resp, err := forwardedResponseIfInstanceIsRemote(s, r, projectName, instName, instanceType)
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -366,22 +373,22 @@ func instanceSnapshotHandler(d *Daemon, r *http.Request) response.Response {
 		return response.SmartError(err)
 	}
 
-	inst, err := instance.LoadByProjectAndName(d.State(), projectName, containerName+shared.SnapshotDelimiter+snapshotName)
+	snapInst, err := instance.LoadByProjectAndName(s, projectName, instName+shared.SnapshotDelimiter+snapshotName)
 	if err != nil {
 		return response.SmartError(err)
 	}
 
 	switch r.Method {
 	case "GET":
-		return snapshotGet(d.State(), inst, snapshotName)
+		return snapshotGet(s, snapInst)
 	case "POST":
-		return snapshotPost(d, r, inst, containerName)
+		return snapshotPost(s, r, snapInst)
 	case "DELETE":
-		return snapshotDelete(d.State(), r, inst, snapshotName)
+		return snapshotDelete(s, r, snapInst)
 	case "PUT":
-		return snapshotPut(d, r, inst, snapshotName)
+		return snapshotPut(s, r, snapInst)
 	case "PATCH":
-		return snapshotPatch(d, r, inst, snapshotName)
+		return snapshotPatch(s, r, snapInst)
 	default:
 		return response.NotFound(fmt.Errorf("Method %q not found", r.Method))
 	}
@@ -419,9 +426,9 @@ func instanceSnapshotHandler(d *Daemon, r *http.Request) response.Response {
 //	    $ref: "#/responses/Forbidden"
 //	  "500":
 //	    $ref: "#/responses/InternalServerError"
-func snapshotPatch(d *Daemon, r *http.Request, snapInst instance.Instance, name string) response.Response {
+func snapshotPatch(s *state.State, r *http.Request, snapInst instance.Instance) response.Response {
 	// Only expires_at is currently editable, so PATCH is equivalent to PUT.
-	return snapshotPut(d, r, snapInst, name)
+	return snapshotPut(s, r, snapInst)
 }
 
 // swagger:operation PUT /1.0/instances/{name}/snapshots/{snapshot} instances instance_snapshot_put
@@ -456,7 +463,7 @@ func snapshotPatch(d *Daemon, r *http.Request, snapInst instance.Instance, name 
 //	    $ref: "#/responses/Forbidden"
 //	  "500":
 //	    $ref: "#/responses/InternalServerError"
-func snapshotPut(d *Daemon, r *http.Request, snapInst instance.Instance, name string) response.Response {
+func snapshotPut(s *state.State, r *http.Request, snapInst instance.Instance) response.Response {
 	// Validate the ETag
 	etag := []any{snapInst.ExpiryDate()}
 	err := util.EtagCheck(r, etag)
@@ -517,15 +524,17 @@ func snapshotPut(d *Daemon, r *http.Request, snapInst instance.Instance, name st
 	}
 
 	opType := operationtype.SnapshotUpdate
+	parentName, snapName, _ := api.GetParentAndSnapshotName(snapInst.Name())
 
-	resources := map[string][]string{}
-	resources["instances"] = []string{name}
+	resources := map[string][]api.URL{}
+	resources["instances"] = []api.URL{*api.NewURL().Path(version.APIVersion, "instances", parentName)}
+	resources["instances_snapshots"] = []api.URL{*api.NewURL().Path(version.APIVersion, "instances", parentName, "snapshots", snapName)}
 
 	if snapInst.Type() == instancetype.Container {
 		resources["containers"] = resources["instances"]
 	}
 
-	op, err := operations.OperationCreate(d.State(), snapInst.Project().Name, operations.OperationClassTask, opType, resources, nil, do, nil, nil, r)
+	op, err := operations.OperationCreate(s, snapInst.Project().Name, operations.OperationClassTask, opType, resources, nil, do, nil, nil, r)
 	if err != nil {
 		return response.InternalError(err)
 	}
@@ -573,7 +582,7 @@ func snapshotPut(d *Daemon, r *http.Request, snapInst instance.Instance, name st
 //	    $ref: "#/responses/Forbidden"
 //	  "500":
 //	    $ref: "#/responses/InternalServerError"
-func snapshotGet(s *state.State, snapInst instance.Instance, name string) response.Response {
+func snapshotGet(s *state.State, snapInst instance.Instance) response.Response {
 	render, _, err := snapInst.Render(storagePools.RenderSnapshotUsage(s, snapInst))
 	if err != nil {
 		return response.SmartError(err)
@@ -621,7 +630,7 @@ func snapshotGet(s *state.State, snapInst instance.Instance, name string) respon
 //	    $ref: "#/responses/Forbidden"
 //	  "500":
 //	    $ref: "#/responses/InternalServerError"
-func snapshotPost(d *Daemon, r *http.Request, snapInst instance.Instance, containerName string) response.Response {
+func snapshotPost(s *state.State, r *http.Request, snapInst instance.Instance) response.Response {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		return response.InternalError(err)
@@ -634,6 +643,8 @@ func snapshotPost(d *Daemon, r *http.Request, snapInst instance.Instance, contai
 	if err != nil {
 		return response.BadRequest(err)
 	}
+
+	parentName, snapName, _ := api.GetParentAndSnapshotName(snapInst.Name())
 
 	migration, err := raw.GetBool("migration")
 	if err == nil && migration {
@@ -657,9 +668,8 @@ func snapshotPost(d *Daemon, r *http.Request, snapInst instance.Instance, contai
 		}
 
 		if reqNew.Live {
-			sourceName, _, _ := api.GetParentAndSnapshotName(containerName)
-			if sourceName != reqNew.Name {
-				return response.BadRequest(fmt.Errorf("Instance name cannot be changed during stateful copy (%q to %q)", sourceName, reqNew.Name))
+			if parentName != reqNew.Name {
+				return response.BadRequest(fmt.Errorf("Instance name cannot be changed during stateful copy (%q to %q)", parentName, reqNew.Name))
 			}
 		}
 
@@ -668,20 +678,21 @@ func snapshotPost(d *Daemon, r *http.Request, snapInst instance.Instance, contai
 			return response.SmartError(err)
 		}
 
-		resources := map[string][]string{}
-		resources["instances"] = []string{containerName}
+		resources := map[string][]api.URL{}
+		resources["instances"] = []api.URL{*api.NewURL().Path(version.APIVersion, "instances", parentName)}
+		resources["instances_snapshots"] = []api.URL{*api.NewURL().Path(version.APIVersion, "instances", parentName, "snapshots", snapName)}
 
 		if snapInst.Type() == instancetype.Container {
 			resources["containers"] = resources["instances"]
 		}
 
 		run := func(op *operations.Operation) error {
-			return ws.Do(d.State(), op)
+			return ws.Do(s, op)
 		}
 
 		if req.Target != nil {
 			// Push mode.
-			op, err := operations.OperationCreate(d.State(), snapInst.Project().Name, operations.OperationClassTask, operationtype.SnapshotTransfer, resources, nil, run, nil, nil, r)
+			op, err := operations.OperationCreate(s, snapInst.Project().Name, operations.OperationClassTask, operationtype.SnapshotTransfer, resources, nil, run, nil, nil, r)
 			if err != nil {
 				return response.InternalError(err)
 			}
@@ -690,7 +701,7 @@ func snapshotPost(d *Daemon, r *http.Request, snapInst instance.Instance, contai
 		}
 
 		// Pull mode.
-		op, err := operations.OperationCreate(d.State(), snapInst.Project().Name, operations.OperationClassWebsocket, operationtype.SnapshotTransfer, resources, ws.Metadata(), run, nil, ws.Connect, r)
+		op, err := operations.OperationCreate(s, snapInst.Project().Name, operations.OperationClassWebsocket, operationtype.SnapshotTransfer, resources, ws.Metadata(), run, nil, ws.Connect, r)
 		if err != nil {
 			return response.InternalError(err)
 		}
@@ -709,10 +720,10 @@ func snapshotPost(d *Daemon, r *http.Request, snapInst instance.Instance, contai
 		return response.BadRequest(fmt.Errorf("Invalid snapshot name: %w", err))
 	}
 
-	fullName := containerName + shared.SnapshotDelimiter + newName
+	fullName := parentName + shared.SnapshotDelimiter + newName
 
 	// Check that the name isn't already in use
-	id, _ := d.db.Cluster.GetInstanceSnapshotID(snapInst.Project().Name, containerName, newName)
+	id, _ := s.DB.Cluster.GetInstanceSnapshotID(snapInst.Project().Name, parentName, newName)
 	if id > 0 {
 		return response.Conflict(fmt.Errorf("Name '%s' already in use", fullName))
 	}
@@ -721,14 +732,15 @@ func snapshotPost(d *Daemon, r *http.Request, snapInst instance.Instance, contai
 		return snapInst.Rename(fullName, false)
 	}
 
-	resources := map[string][]string{}
-	resources["instances"] = []string{containerName}
+	resources := map[string][]api.URL{}
+	resources["instances"] = []api.URL{*api.NewURL().Path(version.APIVersion, "instances", parentName)}
+	resources["instances_snapshots"] = []api.URL{*api.NewURL().Path(version.APIVersion, "instances", parentName, "snapshots", snapName)}
 
 	if snapInst.Type() == instancetype.Container {
 		resources["containers"] = resources["instances"]
 	}
 
-	op, err := operations.OperationCreate(d.State(), snapInst.Project().Name, operations.OperationClassTask, operationtype.SnapshotRename, resources, nil, rename, nil, nil, r)
+	op, err := operations.OperationCreate(s, snapInst.Project().Name, operations.OperationClassTask, operationtype.SnapshotRename, resources, nil, rename, nil, nil, r)
 	if err != nil {
 		return response.InternalError(err)
 	}
@@ -762,13 +774,16 @@ func snapshotPost(d *Daemon, r *http.Request, snapInst instance.Instance, contai
 //	    $ref: "#/responses/Forbidden"
 //	  "500":
 //	    $ref: "#/responses/InternalServerError"
-func snapshotDelete(s *state.State, r *http.Request, snapInst instance.Instance, name string) response.Response {
+func snapshotDelete(s *state.State, r *http.Request, snapInst instance.Instance) response.Response {
 	remove := func(op *operations.Operation) error {
 		return snapInst.Delete(false)
 	}
 
-	resources := map[string][]string{}
-	resources["instances"] = []string{snapInst.Name()}
+	parentName, snapName, _ := api.GetParentAndSnapshotName(snapInst.Name())
+
+	resources := map[string][]api.URL{}
+	resources["instances"] = []api.URL{*api.NewURL().Path(version.APIVersion, "instances", parentName)}
+	resources["instances_snapshots"] = []api.URL{*api.NewURL().Path(version.APIVersion, "instances", parentName, "snapshots", snapName)}
 
 	if snapInst.Type() == instancetype.Container {
 		resources["containers"] = resources["instances"]

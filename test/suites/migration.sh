@@ -31,10 +31,10 @@ test_migration() {
     # shellcheck disable=2153
     storage_pool1="lxdtest-$(basename "${LXD_DIR}")-non-thinpool-lvm-migration"
     storage_pool2="lxdtest-$(basename "${LXD2_DIR}")-non-thinpool-lvm-migration"
-    lxc_remote storage create l1:"$storage_pool1" lvm lvm.use_thinpool=false volume.size=25MB
+    lxc_remote storage create l1:"$storage_pool1" lvm lvm.use_thinpool=false size=1GiB volume.size=25MiB
     lxc_remote profile device set l1:default root pool "$storage_pool1"
 
-    lxc_remote storage create l2:"$storage_pool2" lvm lvm.use_thinpool=false volume.size=25MB
+    lxc_remote storage create l2:"$storage_pool2" lvm lvm.use_thinpool=false size=1GiB volume.size=25MiB
     lxc_remote profile device set l2:default root pool "$storage_pool2"
 
     migration "$LXD2_DIR"
@@ -54,10 +54,10 @@ test_migration() {
       # shellcheck disable=2153
       storage_pool1="lxdtest-$(basename "${LXD_DIR}")-block-mode"
       storage_pool2="lxdtest-$(basename "${LXD2_DIR}")-block-mode"
-      lxc_remote storage create l1:"$storage_pool1" zfs volume.zfs.block_mode=true volume.block.filesystem="${fs}"
+      lxc_remote storage create l1:"$storage_pool1" zfs size=1GiB volume.zfs.block_mode=true volume.block.filesystem="${fs}"
       lxc_remote profile device set l1:default root pool "$storage_pool1"
 
-      lxc_remote storage create l2:"$storage_pool2" zfs volume.zfs.block_mode=true volume.block.filesystem="${fs}"
+      lxc_remote storage create l2:"$storage_pool2" zfs size=1GiB volume.zfs.block_mode=true volume.block.filesystem="${fs}"
       lxc_remote profile device set l2:default root pool "$storage_pool2"
 
       migration "$LXD2_DIR"
@@ -558,6 +558,20 @@ migration() {
 
   lxc_remote rm -f l1:c1
   lxc_remote rm -f l2:c1
+
+  # migrate ISO custom volumes
+  truncate -s 25MiB foo.iso
+  lxc storage volume import l1:"${pool}" ./foo.iso iso1
+  lxc storage volume copy l1:"${pool}"/iso1 l2:"${remote_pool}"/iso1
+
+  lxc storage volume show l2:"${remote_pool}" iso1 | grep -q 'content_type: iso'
+  lxc storage volume move l1:"${pool}"/iso1 l2:"${remote_pool}"/iso2
+  lxc storage volume show l2:"${remote_pool}" iso2 | grep -q 'content_type: iso'
+  ! lxc storage volume show l1:"${pool}" iso1 || false
+
+  lxc storage volume delete l2:"${remote_pool}" iso1
+  lxc storage volume delete l2:"${remote_pool}" iso2
+  rm -f foo.iso
 
   if ! command -v criu >/dev/null 2>&1; then
     echo "==> SKIP: live migration with CRIU (missing binary)"

@@ -10,7 +10,6 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v2"
 
-	"github.com/lxc/lxd/lxc/utils"
 	"github.com/lxc/lxd/shared"
 	"github.com/lxc/lxd/shared/api"
 	cli "github.com/lxc/lxd/shared/cmd"
@@ -238,11 +237,15 @@ func (c *cmdProjectEdit) helpTemplate() string {
 ### A project consists of a set of features and a description.
 ###
 ### An example would look like:
-### name: my-project
-### features:
-###   images: True
-###   profiles: True
+### config:
+###   features.images: "true"
+###   features.networks: "true"
+###   features.networks.zones: "true"
+###   features.profiles: "true"
+###   features.storage.buckets: "true"
+###   features.storage.volumes: "true"
 ### description: My own project
+### name: my-project
 ###
 ### Note that the name is shown but cannot be changed`)
 }
@@ -476,7 +479,7 @@ func (c *cmdProjectList) Run(cmd *cobra.Command, args []string) error {
 		data = append(data, []string{name, images, profiles, storageVolumes, storageBuckets, networks, networkZones, project.Description, strUsedBy})
 	}
 
-	sort.Sort(utils.ByName(data))
+	sort.Sort(cli.SortColumnsNaturally(data))
 
 	header := []string{
 		i18n.G("NAME"),
@@ -490,7 +493,7 @@ func (c *cmdProjectList) Run(cmd *cobra.Command, args []string) error {
 		i18n.G("USED BY"),
 	}
 
-	return utils.RenderTable(c.flagFormat, header, data, projects)
+	return cli.RenderTable(c.flagFormat, header, data, projects)
 }
 
 // Rename.
@@ -817,7 +820,7 @@ func (c *cmdProjectInfo) Run(cmd *cobra.Command, args []string) error {
 		data = append(data, []string{strings.ToUpper(k), limit, usage})
 	}
 
-	sort.Sort(utils.ByName(data))
+	sort.Sort(cli.SortColumnsNaturally(data))
 
 	header := []string{
 		i18n.G("RESOURCE"),
@@ -825,5 +828,5 @@ func (c *cmdProjectInfo) Run(cmd *cobra.Command, args []string) error {
 		i18n.G("USAGE"),
 	}
 
-	return utils.RenderTable(c.flagFormat, header, data, projectState)
+	return cli.RenderTable(c.flagFormat, header, data, projectState)
 }

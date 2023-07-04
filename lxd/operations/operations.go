@@ -97,7 +97,7 @@ type Operation struct {
 	updatedAt   time.Time
 	status      api.StatusCode
 	url         string
-	resources   map[string][]string
+	resources   map[string][]api.URL
 	metadata    map[string]any
 	err         error
 	readonly    bool
@@ -125,7 +125,7 @@ type Operation struct {
 
 // OperationCreate creates a new operation and returns it. If it cannot be
 // created, it returns an error.
-func OperationCreate(s *state.State, projectName string, opClass OperationClass, opType operationtype.Type, opResources map[string][]string, opMetadata any, onRun func(*Operation) error, onCancel func(*Operation) error, onConnect func(*Operation, *http.Request, http.ResponseWriter) error, r *http.Request) (*Operation, error) {
+func OperationCreate(s *state.State, projectName string, opClass OperationClass, opType operationtype.Type, opResources map[string][]api.URL, opMetadata any, onRun func(*Operation) error, onCancel func(*Operation) error, onConnect func(*Operation, *http.Request, http.ResponseWriter) error, r *http.Request) (*Operation, error) {
 	// Don't allow new operations when LXD is shutting down.
 	if s != nil && s.ShutdownCtx.Err() == context.Canceled {
 		return nil, fmt.Errorf("LXD is shutting down")
@@ -146,7 +146,7 @@ func OperationCreate(s *state.State, projectName string, opClass OperationClass,
 	op.resources = opResources
 	op.finished = cancel.New(context.Background())
 	op.state = s
-	op.logger = logger.AddContext(logger.Log, logger.Ctx{"operation": op.id, "project": op.projectName, "class": op.class.String(), "description": op.description})
+	op.logger = logger.AddContext(logger.Ctx{"operation": op.id, "project": op.projectName, "class": op.class.String(), "description": op.description})
 
 	if s != nil {
 		op.SetEventServer(s.Events)
@@ -260,7 +260,10 @@ func (op *Operation) done() {
 		}
 
 		err := removeDBOperation(op)
-		if err != nil {
+		if err != nil && !api.StatusErrorCheck(err, http.StatusNotFound) {
+			// Operations can be deleted from the database before the operation clean up go routine has
+			// run in cases where the project that the operation(s) are associated to is deleted first.
+			// So don't log warning if operation not found.
 			op.logger.Warn("Failed to delete operation", logger.Ctx{"status": op.status, "err": err})
 		}
 	}()
@@ -463,19 +466,20 @@ func (op *Operation) mayCancel() bool {
 // Returns URL of operation and operation info.
 func (op *Operation) Render() (string, *api.Operation, error) {
 	// Setup the resource URLs
+	renderedResources := make(map[string][]string)
 	resources := op.resources
 	if resources != nil {
 		tmpResources := make(map[string][]string)
 		for key, value := range resources {
 			var values []string
 			for _, c := range value {
-				values = append(values, fmt.Sprintf("/%s/%s/%s", version.APIVersion, key, c))
+				values = append(values, c.Project(op.Project()).String())
 			}
 
 			tmpResources[key] = values
 		}
 
-		resources = tmpResources
+		renderedResources = tmpResources
 	}
 
 	// Local server name
@@ -489,7 +493,7 @@ func (op *Operation) Render() (string, *api.Operation, error) {
 		UpdatedAt:   op.updatedAt,
 		Status:      op.status.String(),
 		StatusCode:  op.status,
-		Resources:   resources,
+		Resources:   renderedResources,
 		Metadata:    op.metadata,
 		MayCancel:   op.mayCancel(),
 	}
@@ -508,19 +512,19 @@ func (op *Operation) Render() (string, *api.Operation, error) {
 }
 
 // Wait for the operation to be done.
-// Returns true if operation completed or false if context was cancelled.
-func (op *Operation) Wait(ctx context.Context) (bool, error) {
+// Returns non-nil error if operation failed or context was cancelled.
+func (op *Operation) Wait(ctx context.Context) error {
 	select {
 	case <-op.finished.Done():
-		return true, nil
+		return op.err
 	case <-ctx.Done():
-		return false, nil
+		return ctx.Err()
 	}
 }
 
 // UpdateResources updates the resources of the operation. It returns an error
 // if the operation is not pending or running, or the operation is read-only.
-func (op *Operation) UpdateResources(opResources map[string][]string) error {
+func (op *Operation) UpdateResources(opResources map[string][]api.URL) error {
 	op.lock.Lock()
 	if op.status != api.Pending && op.status != api.Running {
 		op.lock.Unlock()
@@ -646,7 +650,7 @@ func (op *Operation) URL() string {
 }
 
 // Resources returns the operation resources.
-func (op *Operation) Resources() map[string][]string {
+func (op *Operation) Resources() map[string][]api.URL {
 	return op.resources
 }
 

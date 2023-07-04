@@ -34,7 +34,7 @@ import (
 
 // Create a new backup.
 func backupCreate(s *state.State, args db.InstanceBackup, sourceInst instance.Instance, op *operations.Operation) error {
-	l := logger.AddContext(logger.Log, logger.Ctx{"project": sourceInst.Project().Name, "instance": sourceInst.Name(), "name": args.Name})
+	l := logger.AddContext(logger.Ctx{"project": sourceInst.Project().Name, "instance": sourceInst.Name(), "name": args.Name})
 	l.Debug("Instance backup started")
 	defer l.Debug("Instance backup finished")
 
@@ -300,17 +300,23 @@ func pruneExpiredContainerBackupsTask(d *Daemon) (task.Func, task.Schedule) {
 
 		op, err := operations.OperationCreate(s, "", operations.OperationClassTask, operationtype.BackupsExpire, nil, nil, opRun, nil, nil, nil)
 		if err != nil {
-			logger.Error("Failed to start expired instance backups operation", logger.Ctx{"err": err})
+			logger.Error("Failed creating expired instance backups operation", logger.Ctx{"err": err})
 			return
 		}
 
 		logger.Info("Pruning expired instance backups")
 		err = op.Start()
 		if err != nil {
-			logger.Error("Failed to expire instance backups", logger.Ctx{"err": err})
+			logger.Error("Failed starting expired instance backups operation", logger.Ctx{"err": err})
+			return
 		}
 
-		_, _ = op.Wait(ctx)
+		err = op.Wait(ctx)
+		if err != nil {
+			logger.Error("Failed pruning expired instance backups", logger.Ctx{"err": err})
+			return
+		}
+
 		logger.Info("Done pruning expired instance backups")
 	}
 
@@ -355,7 +361,7 @@ func pruneExpiredContainerBackups(ctx context.Context, s *state.State) error {
 }
 
 func volumeBackupCreate(s *state.State, args db.StoragePoolVolumeBackup, projectName string, poolName string, volumeName string) error {
-	l := logger.AddContext(logger.Log, logger.Ctx{"project": projectName, "storage_volume": volumeName, "name": args.Name})
+	l := logger.AddContext(logger.Ctx{"project": projectName, "storage_volume": volumeName, "name": args.Name})
 	l.Debug("Volume backup started")
 	defer l.Debug("Volume backup finished")
 

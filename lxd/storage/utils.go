@@ -149,6 +149,8 @@ func VolumeContentTypeToDBContentType(contentType drivers.ContentType) (int, err
 		return db.StoragePoolVolumeContentTypeBlock, nil
 	case drivers.ContentTypeFS:
 		return db.StoragePoolVolumeContentTypeFS, nil
+	case drivers.ContentTypeISO:
+		return db.StoragePoolVolumeContentTypeISO, nil
 	}
 
 	return -1, fmt.Errorf("Invalid volume content type")
@@ -161,6 +163,8 @@ func VolumeDBContentTypeToContentType(volDBType int) (drivers.ContentType, error
 		return drivers.ContentTypeBlock, nil
 	case db.StoragePoolVolumeContentTypeFS:
 		return drivers.ContentTypeFS, nil
+	case db.StoragePoolVolumeContentTypeISO:
+		return drivers.ContentTypeISO, nil
 	}
 
 	return "", fmt.Errorf("Invalid volume content type")
@@ -173,6 +177,8 @@ func VolumeContentTypeNameToContentType(contentTypeName string) (int, error) {
 		return db.StoragePoolVolumeContentTypeFS, nil
 	case db.StoragePoolVolumeContentTypeNameBlock:
 		return db.StoragePoolVolumeContentTypeBlock, nil
+	case db.StoragePoolVolumeContentTypeNameISO:
+		return db.StoragePoolVolumeContentTypeISO, nil
 	}
 
 	return -1, fmt.Errorf("Invalid volume content type name")
@@ -343,7 +349,8 @@ func BucketDBCreate(ctx context.Context, pool Pool, projectName string, memberSp
 		bucket.Config = map[string]string{}
 	}
 
-	bucketVol := drivers.NewVolume(pool.Driver(), pool.Name(), drivers.VolumeTypeBucket, drivers.ContentTypeFS, bucket.Name, bucket.Config, pool.Driver().Config())
+	bucketVolName := project.StorageVolume(projectName, bucket.Name)
+	bucketVol := drivers.NewVolume(pool.Driver(), pool.Name(), drivers.VolumeTypeBucket, drivers.ContentTypeFS, bucketVolName, bucket.Config, pool.Driver().Config())
 
 	// Fill default config.
 	err := pool.Driver().FillVolumeConfig(bucketVol)
@@ -472,7 +479,7 @@ func validateVolumeCommonRules(vol drivers.Volume) map[string]func(string) error
 //   - Unpack metadata tarball into mountPath.
 //   - Check rootBlockPath is a file and convert qcow2 file into raw format in rootBlockPath.
 func ImageUnpack(imageFile string, vol drivers.Volume, destBlockFile string, blockBackend bool, sysOS *sys.OS, allowUnsafeResize bool, tracker *ioprogress.ProgressTracker) (int64, error) {
-	l := logger.AddContext(logger.Log, logger.Ctx{"imageFile": imageFile, "volName": vol.Name()})
+	l := logger.Log.AddContext(logger.Ctx{"imageFile": imageFile, "volName": vol.Name()})
 	l.Info("Image unpack started")
 	defer l.Info("Image unpack stopped")
 
@@ -531,10 +538,10 @@ func ImageUnpack(imageFile string, vol drivers.Volume, destBlockFile string, blo
 		// Get info about qcow2 file. Force input format to qcow2 so we don't rely on qemu-img's detection
 		// logic as that has been known to have vulnerabilities and we only support qcow2 images anyway.
 		// Use prlimit because qemu-img can consume considerable RAM & CPU time if fed a maliciously
-		// crafted disk image. Since cloud tenants are not to be trusted, ensure QEMU is limits to 1 GB
+		// crafted disk image. Since cloud tenants are not to be trusted, ensure QEMU is limits to 1 GiB
 		// address space and 2 seconds CPU time, which ought to be more than enough for real world images.
-		cmd := []string{"prlimit", "--cpu=2", "--as=1000000000", "qemu-img", "info", "-f", "qcow2", "--output=json", imgPath}
-		imgJSON, err := apparmor.QemuImg(sysOS, cmd, imgPath, "")
+		cmd := []string{"prlimit", "--cpu=2", "--as=1073741824", "qemu-img", "info", "-f", "qcow2", "--output=json", imgPath}
+		imgJSON, err := apparmor.QemuImg(sysOS, cmd, imgPath, dstPath)
 		if err != nil {
 			return -1, fmt.Errorf("Failed reading image info %q: %w", imgPath, err)
 		}
@@ -546,7 +553,7 @@ func ImageUnpack(imageFile string, vol drivers.Volume, destBlockFile string, blo
 
 		err = json.Unmarshal([]byte(imgJSON), &imgInfo)
 		if err != nil {
-			return -1, err
+			return -1, fmt.Errorf("Failed unmarshalling image info %q: %w (%q)", imgPath, err, imgJSON)
 		}
 
 		// Belt and braces qcow2 check.
@@ -914,7 +921,7 @@ func VolumeUsedByDaemon(s *state.State, poolName string, volumeName string) (boo
 
 // FallbackMigrationType returns the fallback migration transport to use based on volume content type.
 func FallbackMigrationType(contentType drivers.ContentType) migration.MigrationFSType {
-	if contentType == drivers.ContentTypeBlock {
+	if drivers.IsContentBlock(contentType) {
 		return migration.MigrationFSType_BLOCK_AND_RSYNC
 	}
 

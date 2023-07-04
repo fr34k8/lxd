@@ -69,9 +69,7 @@ type internalRecoverImportPost struct {
 }
 
 // internalRecoverScan provides the discovery and import functionality for both recovery validate and import steps.
-func internalRecoverScan(d *Daemon, userPools []api.StoragePoolsPost, validateOnly bool) response.Response {
-	s := d.State()
-
+func internalRecoverScan(s *state.State, userPools []api.StoragePoolsPost, validateOnly bool) response.Response {
 	var err error
 	var projects map[string]*api.Project
 	var projectProfiles map[string][]*api.Profile
@@ -130,7 +128,7 @@ func internalRecoverScan(d *Daemon, userPools []api.StoragePoolsPost, validateOn
 		return response.SmartError(fmt.Errorf("Failed getting validate dependency check info: %w", err))
 	}
 
-	isClustered, err := cluster.Enabled(d.db.Node)
+	isClustered, err := cluster.Enabled(s.DB.Node)
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -177,6 +175,12 @@ func internalRecoverScan(d *Daemon, userPools []api.StoragePoolsPost, validateOn
 				pool, err = storagePools.NewTemporary(s, &poolInfo)
 				if err != nil {
 					return response.SmartError(fmt.Errorf("Failed to initialise unknown pool %q: %w", p.Name, err))
+				}
+
+				// Populate configuration with default values.
+				err := pool.Driver().FillConfig()
+				if err != nil {
+					return response.SmartError(fmt.Errorf("Failed to evaluate the default configuration values for unknown pool %q: %w", p.Name, err))
 				}
 
 				err = pool.Driver().Validate(poolInfo.Config)
@@ -403,10 +407,12 @@ func internalRecoverScan(d *Daemon, userPools []api.StoragePoolsPost, validateOn
 				}
 
 				// Import custom volume and any snapshots.
-				err = pool.ImportCustomVolume(customStorageProjectName, poolVol, nil)
+				cleanup, err := pool.ImportCustomVolume(customStorageProjectName, poolVol, nil)
 				if err != nil {
 					return response.SmartError(fmt.Errorf("Failed importing custom volume %q in project %q: %w", poolVol.Volume.Name, projectName, err))
 				}
+
+				revert.Add(cleanup)
 			}
 
 			// Recover unknown instance volumes.
@@ -452,10 +458,12 @@ func internalRecoverScan(d *Daemon, userPools []api.StoragePoolsPost, validateOn
 				}
 
 				// Recreate instance mount path and symlinks (must come after snapshot recovery).
-				err = pool.ImportInstance(inst, poolVol, nil)
+				cleanup, err = pool.ImportInstance(inst, poolVol, nil)
 				if err != nil {
 					return response.SmartError(fmt.Errorf("Failed importing instance %q in project %q: %w", poolVol.Container.Name, projectName, err))
 				}
+
+				revert.Add(cleanup)
 
 				// Reinitialise the instance's root disk quota even if no size specified (allows the storage driver the
 				// opportunity to reinitialise the quota based on the new storage volume's DB ID).
@@ -571,7 +579,7 @@ func internalRecoverValidate(d *Daemon, r *http.Request) response.Response {
 		return response.BadRequest(err)
 	}
 
-	return internalRecoverScan(d, req.Pools, true)
+	return internalRecoverScan(d.State(), req.Pools, true)
 }
 
 // internalRecoverImport performs the pool volume recovery.
@@ -583,5 +591,5 @@ func internalRecoverImport(d *Daemon, r *http.Request) response.Response {
 		return response.BadRequest(err)
 	}
 
-	return internalRecoverScan(d, req.Pools, false)
+	return internalRecoverScan(d.State(), req.Pools, false)
 }

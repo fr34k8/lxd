@@ -73,7 +73,38 @@ func restServer(d *Daemon) *http.Server {
 	if uiEnabled {
 		uiHttpDir := uiHttpDir{http.Dir(uiPath)}
 		mux.PathPrefix("/ui/").Handler(http.StripPrefix("/ui/", http.FileServer(uiHttpDir)))
+		mux.HandleFunc("/ui", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/ui/", 301)
+		})
 	}
+
+	// OIDC browser login (code flow).
+	mux.HandleFunc("/oidc/login", func(w http.ResponseWriter, r *http.Request) {
+		if d.oidcVerifier == nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		d.oidcVerifier.Login(w, r)
+	})
+
+	mux.HandleFunc("/oidc/callback", func(w http.ResponseWriter, r *http.Request) {
+		if d.oidcVerifier == nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		d.oidcVerifier.Callback(w, r)
+	})
+
+	mux.HandleFunc("/oidc/logout", func(w http.ResponseWriter, r *http.Request) {
+		if d.oidcVerifier == nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		d.oidcVerifier.Logout(w, r)
+	})
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -128,7 +159,7 @@ func restServer(d *Daemon) *http.Server {
 
 func hoistReqVM(f func(*Daemon, instance.Instance, http.ResponseWriter, *http.Request) response.Response, d *Daemon) func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
-		trusted, inst, err := authenticateAgentCert(d, r)
+		trusted, inst, err := authenticateAgentCert(d.State(), r)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -219,7 +250,7 @@ func storageBucketsServer(d *Daemon) *http.Server {
 				return
 			}
 
-			minioProc, err := pool.ActivateBucket(bucket.Name, nil)
+			minioProc, err := pool.ActivateBucket(bucket.Project, bucket.Name, nil)
 			if err != nil {
 				errResult := s3.Error{Code: s3.ErrorCodeInternalError, Message: err.Error()}
 				errResult.Response(w)
@@ -299,7 +330,7 @@ func storageBucketsServer(d *Daemon) *http.Server {
 			return
 		}
 
-		minioProc, err := pool.ActivateBucket(bucketName, nil)
+		minioProc, err := pool.ActivateBucket(bucket.Project, bucket.Name, nil)
 		if err != nil {
 			errResult := s3.Error{Code: s3.ErrorCodeInternalError, Message: err.Error()}
 			errResult.Response(w)

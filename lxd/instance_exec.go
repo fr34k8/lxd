@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -77,7 +79,7 @@ func (s *execWs) Connect(op *operations.Operation, r *http.Request, w http.Respo
 
 	for fd, fdSecret := range s.fds {
 		if secret == fdSecret {
-			conn, err := shared.WebsocketUpgrader.Upgrade(w, r, nil)
+			conn, err := ws.Upgrader.Upgrade(w, r, nil)
 			if err != nil {
 				return err
 			}
@@ -293,7 +295,7 @@ func (s *execWs) Do(op *operations.Operation) error {
 		return finisher(-1, err)
 	}
 
-	l := logger.AddContext(logger.Log, logger.Ctx{"project": s.instance.Project().Name, "instance": s.instance.Name(), "PID": cmd.PID(), "interactive": s.req.Interactive})
+	l := logger.AddContext(logger.Ctx{"project": s.instance.Project().Name, "instance": s.instance.Name(), "PID": cmd.PID(), "interactive": s.req.Interactive})
 	l.Debug("Instance process started")
 
 	var cmdKillOnce sync.Once
@@ -512,6 +514,8 @@ func (s *execWs) Do(op *operations.Operation) error {
 //	  "500":
 //	    $ref: "#/responses/InternalServerError"
 func instanceExecPost(d *Daemon, r *http.Request) response.Response {
+	s := d.State()
+
 	instanceType, err := urlInstanceTypeDetect(r)
 	if err != nil {
 		return response.SmartError(err)
@@ -539,13 +543,13 @@ func instanceExecPost(d *Daemon, r *http.Request) response.Response {
 	}
 
 	// Forward the request if the container is remote.
-	client, err := cluster.ConnectIfInstanceIsRemote(d.db.Cluster, projectName, name, d.endpoints.NetworkCert(), d.serverCert(), r, instanceType)
+	client, err := cluster.ConnectIfInstanceIsRemote(s.DB.Cluster, projectName, name, s.Endpoints.NetworkCert(), s.ServerCert(), r, instanceType)
 	if err != nil {
 		return response.SmartError(err)
 	}
 
 	if client != nil {
-		url := api.NewURL().Path("1.0", "instances", name, "exec").Project(projectName)
+		url := api.NewURL().Path(version.APIVersion, "instances", name, "exec").Project(projectName)
 		resp, _, err := client.RawQuery("POST", url.String(), post, "")
 		if err != nil {
 			return response.SmartError(err)
@@ -559,7 +563,7 @@ func instanceExecPost(d *Daemon, r *http.Request) response.Response {
 		return operations.ForwardedOperationResponse(projectName, opAPI)
 	}
 
-	inst, err := instance.LoadByProjectAndName(d.State(), projectName, name)
+	inst, err := instance.LoadByProjectAndName(s, projectName, name)
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -659,14 +663,14 @@ func instanceExecPost(d *Daemon, r *http.Request) response.Response {
 		ws.instance = inst
 		ws.req = post
 
-		resources := map[string][]string{}
-		resources["instances"] = []string{ws.instance.Name()}
+		resources := map[string][]api.URL{}
+		resources["instances"] = []api.URL{*api.NewURL().Path(version.APIVersion, "instances", ws.instance.Name())}
 
 		if ws.instance.Type() == instancetype.Container {
 			resources["containers"] = resources["instances"]
 		}
 
-		op, err := operations.OperationCreate(d.State(), projectName, operations.OperationClassWebsocket, operationtype.CommandExec, resources, ws.Metadata(), ws.Do, nil, ws.Connect, r)
+		op, err := operations.OperationCreate(s, projectName, operations.OperationClassWebsocket, operationtype.CommandExec, resources, ws.Metadata(), ws.Do, nil, ws.Connect, r)
 		if err != nil {
 			return response.InternalError(err)
 		}
@@ -681,15 +685,22 @@ func instanceExecPost(d *Daemon, r *http.Request) response.Response {
 		var stdout, stderr *os.File
 
 		if post.RecordOutput {
+			// Ensure exec-output directory exists
+			execOutputDir := inst.ExecOutputPath()
+			err = os.Mkdir(execOutputDir, 0600)
+			if err != nil && !errors.Is(err, fs.ErrExist) {
+				return err
+			}
+
 			// Prepare stdout and stderr recording.
-			stdout, err = os.OpenFile(filepath.Join(inst.LogPath(), fmt.Sprintf("exec_%s.stdout", op.ID())), os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
+			stdout, err = os.OpenFile(filepath.Join(execOutputDir, fmt.Sprintf("exec_%s.stdout", op.ID())), os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
 			if err != nil {
 				return err
 			}
 
 			defer func() { _ = stdout.Close() }()
 
-			stderr, err = os.OpenFile(filepath.Join(inst.LogPath(), fmt.Sprintf("exec_%s.stderr", op.ID())), os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
+			stderr, err = os.OpenFile(filepath.Join(execOutputDir, fmt.Sprintf("exec_%s.stderr", op.ID())), os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
 			if err != nil {
 				return err
 			}
@@ -698,8 +709,8 @@ func instanceExecPost(d *Daemon, r *http.Request) response.Response {
 
 			// Update metadata with the right URLs.
 			metadata["output"] = shared.Jmap{
-				"1": fmt.Sprintf("/%s/instances/%s/logs/%s", version.APIVersion, inst.Name(), filepath.Base(stdout.Name())),
-				"2": fmt.Sprintf("/%s/instances/%s/logs/%s", version.APIVersion, inst.Name(), filepath.Base(stderr.Name())),
+				"1": fmt.Sprintf("/%s/instances/%s/logs/exec-output/%s", version.APIVersion, inst.Name(), filepath.Base(stdout.Name())),
+				"2": fmt.Sprintf("/%s/instances/%s/logs/exec-output/%s", version.APIVersion, inst.Name(), filepath.Base(stderr.Name())),
 			}
 		}
 
@@ -709,7 +720,7 @@ func instanceExecPost(d *Daemon, r *http.Request) response.Response {
 			return err
 		}
 
-		l := logger.AddContext(logger.Log, logger.Ctx{"project": inst.Project().Name, "instance": inst.Name(), "PID": cmd.PID(), "recordOutput": post.RecordOutput})
+		l := logger.AddContext(logger.Ctx{"project": inst.Project().Name, "instance": inst.Name(), "PID": cmd.PID(), "recordOutput": post.RecordOutput})
 		l.Debug("Instance process started")
 
 		exitStatus, cmdErr := cmd.Wait()
@@ -728,14 +739,14 @@ func instanceExecPost(d *Daemon, r *http.Request) response.Response {
 		return nil
 	}
 
-	resources := map[string][]string{}
-	resources["instances"] = []string{name}
+	resources := map[string][]api.URL{}
+	resources["instances"] = []api.URL{*api.NewURL().Path(version.APIVersion, "instances", name)}
 
 	if inst.Type() == instancetype.Container {
 		resources["containers"] = resources["instances"]
 	}
 
-	op, err := operations.OperationCreate(d.State(), projectName, operations.OperationClassTask, operationtype.CommandExec, resources, nil, run, nil, nil, r)
+	op, err := operations.OperationCreate(s, projectName, operations.OperationClassTask, operationtype.CommandExec, resources, nil, run, nil, nil, r)
 	if err != nil {
 		return response.InternalError(err)
 	}

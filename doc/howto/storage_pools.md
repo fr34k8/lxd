@@ -162,12 +162,11 @@ Then create the storage pool without specifying the `--target` flag to actually 
 For example, the following series of commands sets up a storage pool with the name `my-pool` at different locations and with different sizes on three cluster members:
 
 ```{terminal}
-:input: lxc storage create my-pool zfs source=/dev/sdX size=10GB --target=vm01
-
+:input: lxc storage create my-pool zfs source=/dev/sdX size=10GiB --target=vm01
 Storage pool my-pool pending on member vm01
-:input: lxc storage create my-pool zfs source=/dev/sdX size=15GB --target=vm02
+:input: lxc storage create my-pool zfs source=/dev/sdX size=15GiB --target=vm02
 Storage pool my-pool pending on member vm02
-:input: lxc storage create my-pool zfs source=/dev/sdY size=10GB --target=vm03
+:input: lxc storage create my-pool zfs source=/dev/sdY size=10GiB --target=vm03
 Storage pool my-pool pending on member vm03
 :input: lxc storage create my-pool zfs
 Storage pool my-pool created
@@ -214,6 +213,10 @@ The resulting table contains the storage pool that you created during initializa
 To show detailed information about a specific pool, use the following command:
 
     lxc storage show <pool_name>
+
+To see usage information for a specific pool, run the following command:
+
+    lxc storage info <pool_name>
 
 (storage-resize-pool)=
 ## Resize a storage pool

@@ -18,7 +18,6 @@ import (
 	"gopkg.in/yaml.v2"
 
 	"github.com/lxc/lxd/client"
-	"github.com/lxc/lxd/lxc/utils"
 	"github.com/lxc/lxd/lxd/revert"
 	"github.com/lxc/lxd/shared"
 	"github.com/lxc/lxd/shared/api"
@@ -135,8 +134,8 @@ func (c *cmdMigrate) askServer() (lxd.InstanceServer, string, error) {
 
 	digest := shared.CertFingerprint(certificate)
 
-	fmt.Printf("Certificate fingerprint: %s\n", digest)
-	fmt.Printf("ok (y/n)? ")
+	fmt.Println("Certificate fingerprint:", digest)
+	fmt.Print("ok (y/n)? ")
 	line, err := shared.ReadStdin()
 	if err != nil {
 		return nil, "", err
@@ -350,8 +349,8 @@ func (c *cmdMigrate) RunInteractive(server lxd.InstanceServer) (cmdMigrateData, 
 				return cmdMigrateData{}, err
 			}
 
-			if hasSecureBoot {
-				config.InstanceArgs.Config["security.secureboot"] = "true"
+			if !hasSecureBoot {
+				config.InstanceArgs.Config["security.secureboot"] = "false"
 			}
 		}
 	}
@@ -394,14 +393,14 @@ func (c *cmdMigrate) RunInteractive(server lxd.InstanceServer) (cmdMigrateData, 
 	}
 
 	for {
-		fmt.Printf("\nInstance to be created:\n")
+		fmt.Println("\nInstance to be created:")
 
 		scanner := bufio.NewScanner(strings.NewReader(config.Render()))
 		for scanner.Scan() {
 			fmt.Printf("  %s\n", scanner.Text())
 		}
 
-		fmt.Printf(`
+		fmt.Print(`
 Additional overrides can be applied at this stage:
 1) Begin the migration with the above configuration
 2) Override profile list
@@ -572,7 +571,7 @@ func (c *cmdMigrate) Run(cmd *cobra.Command, args []string) error {
 		_, _ = server.DeleteInstance(config.InstanceArgs.Name)
 	})
 
-	progress := utils.ProgressRenderer{Format: "Transferring instance: %s"}
+	progress := cli.ProgressRenderer{Format: "Transferring instance: %s"}
 	_, err = op.AddHandler(progress.UpdateOp)
 	if err != nil {
 		progress.Done("")

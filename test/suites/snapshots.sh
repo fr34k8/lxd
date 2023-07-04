@@ -3,7 +3,7 @@ test_snapshots() {
 
   if [ "$(storage_backend "$LXD_DIR")" = "lvm" ]; then
     # Test that non-thinpool lvm backends work fine with snaphots.
-    lxc storage create "lxdtest-$(basename "${LXD_DIR}")-non-thinpool-lvm-snapshots" lvm lvm.use_thinpool=false volume.size=25MB
+    lxc storage create "lxdtest-$(basename "${LXD_DIR}")-non-thinpool-lvm-snapshots" lvm lvm.use_thinpool=false volume.size=25MiB
     lxc profile device set default root pool "lxdtest-$(basename "${LXD_DIR}")-non-thinpool-lvm-snapshots"
 
     snapshots
@@ -54,6 +54,13 @@ snapshots() {
     [ ! -d "${LXD_DIR}/snapshots/foo/snap0" ]
   fi
 
+  # test deleting multiple snapshots
+  lxc snapshot foo snap2
+  lxc snapshot foo snap3
+  lxc delete foo/snap2 foo/snap3
+  ! lxc info foo | grep -q snap2 || false
+  ! lxc info foo | grep -q snap3 || false
+
   # no CLI for this, so we use the API directly (rename a snapshot)
   wait_for "${LXD_ADDR}" my_curl -X POST "https://${LXD_ADDR}/1.0/containers/foo/snapshots/tester" -d "{\"name\":\"tester2\"}"
   # FIXME: make this backend agnostic
@@ -93,7 +100,7 @@ test_snap_restore() {
 
   if [ "$(storage_backend "$LXD_DIR")" = "lvm" ]; then
     # Test that non-thinpool lvm backends work fine with snaphots.
-    lxc storage create "lxdtest-$(basename "${LXD_DIR}")-non-thinpool-lvm-snap-restore" lvm lvm.use_thinpool=false volume.size=25MB
+    lxc storage create "lxdtest-$(basename "${LXD_DIR}")-non-thinpool-lvm-snap-restore" lvm lvm.use_thinpool=false volume.size=25MiB
     lxc profile device set default root pool "lxdtest-$(basename "${LXD_DIR}")-non-thinpool-lvm-snap-restore"
 
     snap_restore

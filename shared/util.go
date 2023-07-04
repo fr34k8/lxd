@@ -88,7 +88,7 @@ func PathIsEmpty(path string) (bool, error) {
 	defer func() { _ = f.Close() }()
 
 	// read in ONLY one file
-	_, err = f.Readdir(1)
+	_, err = f.ReadDir(1)
 
 	// and if the file is EOF... well, the dir is empty.
 	if err == io.EOF {
@@ -634,6 +634,17 @@ func StringInSlice(key string, list []string) bool {
 	return false
 }
 
+// StringPrefixInSlice returns true if any element in the list has the given prefix.
+func StringPrefixInSlice(key string, list []string) bool {
+	for _, entry := range list {
+		if strings.HasPrefix(entry, key) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // RemoveElementsFromStringSlice returns a slice equivalent to removing the given elements from the given list.
 // Elements not present in the list are ignored.
 func RemoveElementsFromStringSlice(list []string, elements ...string) []string {
@@ -1099,7 +1110,7 @@ func SetProgressMetadata(metadata map[string]any, stage, displayPrefix string, p
 
 func DownloadFileHash(ctx context.Context, httpClient *http.Client, useragent string, progress func(progress ioprogress.ProgressData), canceler *cancel.HTTPRequestCanceller, filename string, url string, hash string, hashFunc hash.Hash, target io.WriteSeeker) (int64, error) {
 	// Always seek to the beginning
-	_, _ = target.Seek(0, 0)
+	_, _ = target.Seek(0, io.SeekStart)
 
 	var req *http.Request
 	var err error
@@ -1359,4 +1370,16 @@ func JoinTokenDecode(input string) (*api.ClusterMemberJoinToken, error) {
 	}
 
 	return &j, nil
+}
+
+// TargetDetect returns either target node or group based on the provided prefix:
+// An invocation with `target=h1` returns "h1", "" and `target=@g1` returns "", "g1".
+func TargetDetect(target string) (targetNode string, targetGroup string) {
+	if strings.HasPrefix(target, "@") {
+		targetGroup = strings.TrimPrefix(target, "@")
+	} else {
+		targetNode = target
+	}
+
+	return
 }

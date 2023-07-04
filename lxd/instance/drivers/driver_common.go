@@ -24,6 +24,7 @@ import (
 	"github.com/lxc/lxd/lxd/instance"
 	"github.com/lxc/lxd/lxd/instance/instancetype"
 	"github.com/lxc/lxd/lxd/instance/operationlock"
+	"github.com/lxc/lxd/lxd/lifecycle"
 	"github.com/lxc/lxd/lxd/locking"
 	"github.com/lxc/lxd/lxd/maas"
 	"github.com/lxc/lxd/lxd/operations"
@@ -384,6 +385,11 @@ func (d *common) Path() string {
 	return storagePools.InstancePath(d.dbType, d.project.Name, d.name, d.isSnapshot)
 }
 
+// ExecOutputPath returns the instance's exec output path.
+func (d *common) ExecOutputPath() string {
+	return filepath.Join(d.Path(), "exec-output")
+}
+
 // RootfsPath returns the instance's rootfs path.
 func (d *common) RootfsPath() string {
 	return filepath.Join(d.Path(), "rootfs")
@@ -514,6 +520,16 @@ func (d *common) restartCommon(inst instance.Instance, timeout time.Duration) er
 
 	// Handle ephemeral instances.
 	ephemeral := inst.IsEphemeral()
+
+	ctxMap := logger.Ctx{
+		"action":    "shutdown",
+		"created":   d.creationDate,
+		"ephemeral": ephemeral,
+		"used":      d.lastUsedDate,
+		"timeout":   timeout}
+
+	d.logger.Info("Restarting instance", ctxMap)
+
 	if ephemeral {
 		// Unset ephemeral flag
 		args := db.InstanceArgs{
@@ -553,7 +569,7 @@ func (d *common) restartCommon(inst instance.Instance, timeout time.Duration) er
 			return err
 		}
 
-		err := inst.Shutdown(timeout * time.Second)
+		err := inst.Shutdown(timeout)
 		if err != nil {
 			op.Done(err)
 			return err
@@ -572,6 +588,75 @@ func (d *common) restartCommon(inst instance.Instance, timeout time.Duration) er
 		return err
 	}
 
+	d.logger.Info("Restarted instance", ctxMap)
+	d.state.Events.SendLifecycle(d.project.Name, lifecycle.InstanceRestarted.Event(d, nil))
+
+	return nil
+}
+
+// rebuildCommon handles the common part of instance rebuilds.
+func (d *common) rebuildCommon(inst instance.Instance, img *api.Image, op *operations.Operation) error {
+	instLocalConfig := d.localConfig
+
+	// Reset the "image.*" keys.
+	for k := range instLocalConfig {
+		if strings.HasPrefix(k, "image.") {
+			delete(instLocalConfig, k)
+		}
+	}
+
+	delete(instLocalConfig, "volatile.base_image")
+	if img != nil {
+		for k, v := range img.Properties {
+			instLocalConfig[fmt.Sprintf("image.%s", k)] = v
+		}
+
+		instLocalConfig["volatile.base_image"] = img.Fingerprint
+		instLocalConfig["volatile.uuid.generation"] = instLocalConfig["volatile.uuid"]
+	}
+
+	// Reset relevant volatile keys.
+	delete(instLocalConfig, "volatile.idmap.next")
+	delete(instLocalConfig, "volatile.last_state.idmap")
+
+	pool, err := d.getStoragePool()
+	if err != nil {
+		return err
+	}
+
+	err = pool.DeleteInstance(inst, op)
+	if err != nil {
+		return err
+	}
+
+	// Rebuild as empty if there is no image provided.
+	if img == nil {
+		return pool.CreateInstance(inst, nil)
+	}
+
+	err = pool.CreateInstanceFromImage(inst, img.Fingerprint, op)
+	if err != nil {
+		return err
+	}
+
+	err = d.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		err = dbCluster.UpdateInstanceConfig(ctx, tx.Tx(), int64(inst.ID()), instLocalConfig)
+		if err != nil {
+			return err
+		}
+
+		err = tx.UpdateImageLastUseDate(ctx, inst.Project().Name, img.Fingerprint, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	d.localConfig = instLocalConfig
 	return nil
 }
 
@@ -937,7 +1022,7 @@ func (d *common) onStopOperationSetup(target string) (*operationlock.InstanceOpe
 	op := operationlock.Get(d.Project().Name, d.Name())
 	if op != nil && !op.ActionMatch(operationlock.ActionStart, operationlock.ActionRestart, operationlock.ActionStop, operationlock.ActionRestore) {
 		d.logger.Debug("Waiting for existing operation lock to finish before running hook", logger.Ctx{"action": op.Action()})
-		_ = op.Wait()
+		_ = op.Wait(context.Background())
 		op = nil
 	}
 
@@ -1024,13 +1109,13 @@ func (d *common) recordLastState() error {
 	var err error
 
 	// Record power state.
-	d.localConfig["volatile.last_state.power"] = "RUNNING"
-	d.expandedConfig["volatile.last_state.power"] = "RUNNING"
+	d.localConfig["volatile.last_state.power"] = instance.PowerStateRunning
+	d.expandedConfig["volatile.last_state.power"] = instance.PowerStateRunning
 
 	// Database updates
 	return d.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 		// Record power state.
-		err = tx.UpdateInstancePowerState(d.id, "RUNNING")
+		err = tx.UpdateInstancePowerState(d.id, instance.PowerStateRunning)
 		if err != nil {
 			err = fmt.Errorf("Error updating instance power state: %w", err)
 			return err

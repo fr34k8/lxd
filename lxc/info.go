@@ -11,7 +11,6 @@ import (
 
 	"github.com/lxc/lxd/client"
 	"github.com/lxc/lxd/lxc/config"
-	"github.com/lxc/lxd/lxc/utils"
 	"github.com/lxc/lxd/shared"
 	"github.com/lxc/lxd/shared/api"
 	cli "github.com/lxc/lxd/shared/cmd"
@@ -140,7 +139,7 @@ func (c *cmdInfo) renderGPU(gpu api.ResourcesGPUCard, prefix string, initial boo
 		if len(gpu.SRIOV.VFs) > 0 {
 			fmt.Printf(prefix+"  "+i18n.G("VFs: %d")+"\n", gpu.SRIOV.MaximumVFs)
 			for _, vf := range gpu.SRIOV.VFs {
-				fmt.Printf(prefix + "  - ")
+				fmt.Print(prefix + "  - ")
 				c.renderGPU(vf, prefix+"    ", false)
 			}
 		}
@@ -159,7 +158,7 @@ func (c *cmdInfo) renderGPU(gpu api.ResourcesGPUCard, prefix string, initial boo
 		for _, k := range keys {
 			v := gpu.Mdev[k]
 
-			fmt.Println(prefix + "  - " + fmt.Sprintf(i18n.G("%s (%d available)"), k, v.Available))
+			fmt.Println(prefix + "  - " + fmt.Sprintf(i18n.G("%s (%s) (%d available)"), k, v.Name, v.Available))
 			if v.Description != "" {
 				for _, line := range strings.Split(v.Description, "\n") {
 					fmt.Printf(prefix+"      %s\n", line)
@@ -249,7 +248,7 @@ func (c *cmdInfo) renderNIC(nic api.ResourcesNetworkCard, prefix string, initial
 		if len(nic.SRIOV.VFs) > 0 {
 			fmt.Printf(prefix+"  "+i18n.G("VFs: %d")+"\n", nic.SRIOV.MaximumVFs)
 			for _, vf := range nic.SRIOV.VFs {
-				fmt.Printf(prefix + "  - ")
+				fmt.Print(prefix + "  - ")
 				c.renderNIC(vf, prefix+"    ", false)
 			}
 		}
@@ -632,7 +631,7 @@ func (c *cmdInfo) instanceInfo(d lxd.InstanceServer, remote config.Remote, name 
 			i18n.G("Stateful"),
 		}
 
-		_ = utils.RenderTable(utils.TableFormatTable, snapHeader, snapData, inst.Snapshots)
+		_ = cli.RenderTable(cli.TableFormatTable, snapHeader, snapData, inst.Snapshots)
 	}
 
 	// List backups
@@ -684,7 +683,7 @@ func (c *cmdInfo) instanceInfo(d lxd.InstanceServer, remote config.Remote, name 
 			i18n.G("Optimized Storage"),
 		}
 
-		_ = utils.RenderTable(utils.TableFormatTable, backupHeader, backupData, inst.Backups)
+		_ = cli.RenderTable(cli.TableFormatTable, backupHeader, backupData, inst.Backups)
 	}
 
 	if showLog {

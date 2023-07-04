@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/lxc/lxd/client"
+	"github.com/lxc/lxd/lxc/config"
 	"github.com/lxc/lxd/shared"
 	"github.com/lxc/lxd/shared/api"
 	"github.com/lxc/lxd/shared/i18n"
@@ -107,6 +108,45 @@ func parseDeviceOverrides(deviceOverrideArgs []string) (map[string]map[string]st
 	}
 
 	return deviceMap, nil
+}
+
+// IsAliasesSubset returns true if the first array is completely contained in the second array.
+func IsAliasesSubset(a1 []api.ImageAlias, a2 []api.ImageAlias) bool {
+	set := make(map[string]interface{})
+	for _, alias := range a2 {
+		set[alias.Name] = nil
+	}
+
+	for _, alias := range a1 {
+		_, found := set[alias.Name]
+		if !found {
+			return false
+		}
+	}
+
+	return true
+}
+
+// GetCommonAliases returns the common aliases between a list of aliases and all the existing ones.
+func GetCommonAliases(client lxd.InstanceServer, aliases ...api.ImageAlias) ([]api.ImageAliasesEntry, error) {
+	if len(aliases) == 0 {
+		return nil, nil
+	}
+
+	names := make([]string, len(aliases))
+	for i, alias := range aliases {
+		names[i] = alias.Name
+	}
+
+	// 'GetExistingAliases' which is using 'sort.SearchStrings' requires sorted slice
+	sort.Strings(names)
+
+	resp, err := client.GetImageAliases()
+	if err != nil {
+		return nil, err
+	}
+
+	return GetExistingAliases(names, resp), nil
 }
 
 // Create the specified image aliases, updating those that already exist.
@@ -275,4 +315,76 @@ func getServerSupportedFilters(filters []string, i interface{}) ([]string, []str
 	}
 
 	return supportedFilters, unsupportedFilters
+}
+
+// guessImage checks that the image name (provided by the user) is correct given an instance remote and image remote.
+func guessImage(conf *config.Config, d lxd.InstanceServer, instRemote string, imgRemote string, imageRef string) (string, string) {
+	if instRemote != imgRemote {
+		return imgRemote, imageRef
+	}
+
+	fields := strings.SplitN(imageRef, "/", 2)
+	_, ok := conf.Remotes[fields[0]]
+	if !ok {
+		return imgRemote, imageRef
+	}
+
+	_, _, err := d.GetImageAlias(imageRef)
+	if err == nil {
+		return imgRemote, imageRef
+	}
+
+	_, _, err = d.GetImage(imageRef)
+	if err == nil {
+		return imgRemote, imageRef
+	}
+
+	if len(fields) == 1 {
+		fmt.Fprintf(os.Stderr, i18n.G("The local image '%q' couldn't be found, trying '%q:' instead.")+"\n", imageRef, fields[0])
+		return fields[0], "default"
+	}
+
+	fmt.Fprintf(os.Stderr, i18n.G("The local image '%q' couldn't be found, trying '%q:%q' instead.")+"\n", imageRef, fields[0], fields[1])
+	return fields[0], fields[1]
+}
+
+// getImgInfo returns an image server and image info for the given image name (given by a user)
+// an image remote and an instance remote.
+func getImgInfo(d lxd.InstanceServer, conf *config.Config, imgRemote string, instRemote string, imageRef string, source *api.InstanceSource) (lxd.ImageServer, *api.Image, error) {
+	var imgRemoteServer lxd.ImageServer
+	var imgInfo *api.Image
+	var err error
+
+	// Connect to the image server
+	if imgRemote == instRemote {
+		imgRemoteServer = d
+	} else {
+		imgRemoteServer, err = conf.GetImageServer(imgRemote)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	// Optimisation for simplestreams
+	if conf.Remotes[imgRemote].Protocol == "simplestreams" {
+		imgInfo = &api.Image{}
+		imgInfo.Fingerprint = imageRef
+		imgInfo.Public = true
+		source.Alias = imageRef
+	} else {
+		// Attempt to resolve an image alias
+		alias, _, err := imgRemoteServer.GetImageAlias(imageRef)
+		if err == nil {
+			source.Alias = imageRef
+			imageRef = alias.Target
+		}
+
+		// Get the image info
+		imgInfo, _, err = imgRemoteServer.GetImage(imageRef)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	return imgRemoteServer, imgInfo, nil
 }

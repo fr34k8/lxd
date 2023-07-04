@@ -13,7 +13,7 @@ discourse: 15457
 It is highly scalable and, as a distributed system without a single point of failure, very reliable.
 
 ```{tip}
-If you want to quickly set up a basic Ceph cluster, check out [MicroCeph](https://discuss.linuxcontainers.org/t/introducing-microceph/15457).
+If you want to quickly set up a basic Ceph cluster, check out [MicroCeph](https://microcloud.is).
 ```
 
 Ceph provides different components for block storage and for file systems.
@@ -109,11 +109,11 @@ Key                           | Type                          | Default         
 
 Key                     | Type      | Condition                 | Default                                        | Description
 :--                     | :---      | :--------                 | :------                                        | :----------
-`block.filesystem`      | string    | block based driver        | same as `volume.block.filesystem`              | {{block_filesystem}}
-`block.mount_options`   | string    | block based driver        | same as `volume.block.mount_options`           | Mount options for block devices
+`block.filesystem`      | string    |                           | same as `volume.block.filesystem`              | {{block_filesystem}}
+`block.mount_options`   | string    |                           | same as `volume.block.mount_options`           | Mount options for block-backed file system volumes
 `security.shifted`      | bool      | custom volume             | same as `volume.security.shifted` or `false`   | {{enable_ID_shifting}}
 `security.unmapped`     | bool      | custom volume             | same as `volume.security.unmapped` or `false`  | Disable ID mapping for the volume
-`size`                  | string    | appropriate driver        | same as `volume.size`                          | Size/quota of the storage volume
+`size`                  | string    |                           | same as `volume.size`                          | Size/quota of the storage volume
 `snapshots.expiry`      | string    | custom volume             | same as `volume.snapshots.expiry`              | {{snapshot_expiry_format}}
 `snapshots.pattern`     | string    | custom volume             | same as `volume.snapshots.pattern` or `snap%d` | {{snapshot_pattern_format}} [^*]
 `snapshots.schedule`    | string    | custom volume             | same as `volume.snapshots.schedule`            | {{snapshot_schedule_format}}

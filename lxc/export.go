@@ -3,14 +3,14 @@ package main
 import (
 	"fmt"
 	"io"
+	"net/url"
 	"os"
-	"strings"
+	"path"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/lxc/lxd/client"
-	"github.com/lxc/lxd/lxc/utils"
 	"github.com/lxc/lxd/shared"
 	"github.com/lxc/lxd/shared/api"
 	cli "github.com/lxc/lxd/shared/cmd"
@@ -82,7 +82,7 @@ func (c *cmdExport) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	// Watch the background operation
-	progress := utils.ProgressRenderer{
+	progress := cli.ProgressRenderer{
 		Format: i18n.G("Backing up instance: %s"),
 		Quiet:  c.global.flagQuiet,
 	}
@@ -94,7 +94,7 @@ func (c *cmdExport) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	// Wait until backup is done
-	err = utils.CancelableWait(op, &progress)
+	err = cli.CancelableWait(op, &progress)
 	if err != nil {
 		progress.Done("")
 		return err
@@ -108,8 +108,16 @@ func (c *cmdExport) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get name of backup
-	backupName := strings.TrimPrefix(op.Get().Resources["backups"][0],
-		"/1.0/backups/")
+	uStr := op.Get().Resources["backups"][0]
+	u, err := url.Parse(uStr)
+	if err != nil {
+		return fmt.Errorf("Invalid URL %q: %w", uStr, err)
+	}
+
+	backupName, err := url.PathUnescape(path.Base(u.EscapedPath()))
+	if err != nil {
+		return fmt.Errorf("Invalid backup name segment in path %q: %w", u.EscapedPath(), err)
+	}
 
 	defer func() {
 		// Delete backup after we're done
@@ -140,7 +148,7 @@ func (c *cmdExport) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	// Prepare the download request
-	progress = utils.ProgressRenderer{
+	progress = cli.ProgressRenderer{
 		Format: i18n.G("Exporting the backup: %s"),
 		Quiet:  c.global.flagQuiet,
 	}
@@ -160,7 +168,7 @@ func (c *cmdExport) Run(cmd *cobra.Command, args []string) error {
 
 	// Detect backup file type and rename file accordingly
 	if len(args) <= 1 {
-		_, err := target.Seek(0, 0)
+		_, err := target.Seek(0, io.SeekStart)
 		if err != nil {
 			return err
 		}
@@ -170,7 +178,7 @@ func (c *cmdExport) Run(cmd *cobra.Command, args []string) error {
 			return err
 		}
 
-		err = os.Rename(shared.HostPathFollow(targetName), name+ext)
+		err = os.Rename(shared.HostPathFollow(targetName), shared.HostPathFollow(name+ext))
 		if err != nil {
 			return fmt.Errorf("Failed to rename export file: %w", err)
 		}

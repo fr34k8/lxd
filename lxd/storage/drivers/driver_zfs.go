@@ -44,8 +44,11 @@ type zfs struct {
 func (d *zfs) load() error {
 	// Register the patches.
 	d.patches = map[string]func() error{
-		"storage_lvm_skipactivation":       nil,
-		"storage_missing_snapshot_records": nil,
+		"storage_lvm_skipactivation":                         nil,
+		"storage_missing_snapshot_records":                   nil,
+		"storage_delete_old_snapshot_records":                nil,
+		"storage_zfs_drop_block_volume_filesystem_extension": d.patchDropBlockVolumeFilesystemExtension,
+		"storage_prefix_bucket_names_with_project":           nil,
 	}
 
 	// Done if previously loaded.
@@ -173,12 +176,8 @@ func (d zfs) ensureInitialDatasets(warnOnExistingPolicyApplyError bool) error {
 	return nil
 }
 
-// Create is called during pool creation and is effectively using an empty driver struct.
-// WARNING: The Create() function cannot rely on any of the struct attributes being set.
-func (d *zfs) Create() error {
-	// Store the provided source as we are likely to be mangling it.
-	d.config["volatile.initial_source"] = d.config["source"]
-
+// FillConfig populates the storage pool's configuration file with the default values.
+func (d *zfs) FillConfig() error {
 	loopPath := loopFilePath(d.name)
 	if d.config["source"] == "" || d.config["source"] == loopPath {
 		// Create a loop based pool.
@@ -189,11 +188,6 @@ func (d *zfs) Create() error {
 			d.config["zfs.pool_name"] = d.name
 		}
 
-		// Validate pool_name.
-		if strings.Contains(d.config["zfs.pool_name"], "/") {
-			return fmt.Errorf("zfs.pool_name can't point to a dataset when source isn't set")
-		}
-
 		// Pick a default size of the loop file if not specified.
 		if d.config["size"] == "" {
 			defaultSize, err := loopFileSizeDefault()
@@ -202,6 +196,44 @@ func (d *zfs) Create() error {
 			}
 
 			d.config["size"] = fmt.Sprintf("%dGiB", defaultSize)
+		}
+	} else if filepath.IsAbs(d.config["source"]) {
+		// Set default pool_name.
+		if d.config["zfs.pool_name"] == "" {
+			d.config["zfs.pool_name"] = d.name
+		}
+
+		// Unset size property since it's irrelevant.
+		d.config["size"] = ""
+	} else {
+		// Handle an existing zpool.
+		if d.config["zfs.pool_name"] == "" {
+			d.config["zfs.pool_name"] = d.config["source"]
+		}
+
+		// Unset size property since it's irrelevant.
+		d.config["size"] = ""
+	}
+
+	return nil
+}
+
+// Create is called during pool creation and is effectively using an empty driver struct.
+// WARNING: The Create() function cannot rely on any of the struct attributes being set.
+func (d *zfs) Create() error {
+	// Store the provided source as we are likely to be mangling it.
+	d.config["volatile.initial_source"] = d.config["source"]
+
+	err := d.FillConfig()
+	if err != nil {
+		return err
+	}
+
+	loopPath := loopFilePath(d.name)
+	if d.config["source"] == "" || d.config["source"] == loopPath {
+		// Validate pool_name.
+		if strings.Contains(d.config["zfs.pool_name"], "/") {
+			return fmt.Errorf("zfs.pool_name can't point to a dataset when source isn't set")
 		}
 
 		// Create the loop file itself.
@@ -232,14 +264,6 @@ func (d *zfs) Create() error {
 		// Handle existing block devices.
 		if !shared.IsBlockdevPath(d.config["source"]) {
 			return fmt.Errorf("Custom loop file locations are not supported")
-		}
-
-		// Unset size property since it's irrelevant.
-		d.config["size"] = ""
-
-		// Set default pool_name.
-		if d.config["zfs.pool_name"] == "" {
-			d.config["zfs.pool_name"] = d.name
 		}
 
 		// Validate pool_name.
@@ -280,14 +304,6 @@ func (d *zfs) Create() error {
 		// We don't need to keep the original source path around for import.
 		d.config["source"] = d.config["zfs.pool_name"]
 	} else {
-		// Handle an existing zpool.
-		if d.config["zfs.pool_name"] == "" {
-			d.config["zfs.pool_name"] = d.config["source"]
-		}
-
-		// Unset size property since it's irrelevant.
-		d.config["size"] = ""
-
 		// Validate pool_name.
 		if d.config["zfs.pool_name"] != d.config["source"] {
 			return fmt.Errorf("The source must match zfs.pool_name if specified")
@@ -321,7 +337,7 @@ func (d *zfs) Create() error {
 		}
 
 		if len(datasets) > 0 {
-			return fmt.Errorf(`Provided ZFS pool (or dataset) isn't empty, run "sudo zfs list %s" to see existing entries`, d.config["zfs.pool_name"])
+			return fmt.Errorf(`Provided ZFS pool (or dataset) isn't empty, run "sudo zfs list -r %s" to see existing entries`, d.config["zfs.pool_name"])
 		}
 	}
 
@@ -332,7 +348,7 @@ func (d *zfs) Create() error {
 	revert.Add(func() { _ = d.Delete(nil) })
 
 	// Apply our default configuration.
-	err := d.ensureInitialDatasets(false)
+	err = d.ensureInitialDatasets(false)
 	if err != nil {
 		return err
 	}
@@ -617,7 +633,7 @@ func (d *zfs) MigrationTypes(contentType ContentType, refresh bool, copySnapshot
 		features = append(features, "compress")
 	}
 
-	if contentType == ContentTypeBlock {
+	if IsContentBlock(contentType) {
 		return []migration.Type{
 			{
 				FSType:   migration.MigrationFSType_ZFS,
@@ -649,4 +665,40 @@ func (d *zfs) MigrationTypes(contentType ContentType, refresh bool, copySnapshot
 			Features: rsyncFeatures,
 		},
 	}
+}
+
+// patchDropBlockVolumeFilesystemExtension removes the filesystem extension (e.g _ext4) from VM image block volumes.
+func (d *zfs) patchDropBlockVolumeFilesystemExtension() error {
+	poolName, ok := d.config["zfs.pool_name"]
+	if !ok {
+		poolName = d.name
+	}
+
+	out, err := shared.RunCommand("zfs", "list", "-H", "-r", "-o", "name", "-t", "volume", fmt.Sprintf("%s/images", poolName))
+	if err != nil {
+		return fmt.Errorf("Failed listing images: %w", err)
+	}
+
+	for _, volume := range strings.Split(out, "\n") {
+		fields := strings.SplitN(volume, "/", 3)
+
+		if len(fields) != 3 {
+			continue
+		}
+
+		// Ignore non-block images, and images without filesystem extension
+		if !strings.HasSuffix(fields[2], ".block") || !strings.Contains(fields[2], "_") {
+			continue
+		}
+
+		// Rename zfs dataset. Snapshots will automatically be renamed.
+		newName := fmt.Sprintf("%s/images/%s.block", poolName, strings.Split(fields[2], "_")[0])
+
+		_, err = shared.RunCommand("zfs", "rename", volume, newName)
+		if err != nil {
+			return fmt.Errorf("Failed renaming zfs dataset: %w", err)
+		}
+	}
+
+	return nil
 }

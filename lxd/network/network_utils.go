@@ -682,15 +682,23 @@ func inRoutingTable(subnet *net.IPNet) bool {
 	return false
 }
 
-// pingIP sends a single ping packet to the specified IP, returns true if responds, false if not.
-func pingIP(ip net.IP) bool {
+// pingIP sends a single ping packet to the specified IP, returns nil error if IP is reachable.
+// If ctx doesn't have a deadline then the default timeout used is 1s.
+func pingIP(ctx context.Context, ip net.IP) error {
 	cmd := "ping"
 	if ip.To4() == nil {
 		cmd = "ping6"
 	}
 
-	_, err := shared.RunCommand(cmd, "-n", "-q", ip.String(), "-c", "1", "-W", "1")
-	return err == nil
+	timeout := time.Second * 1
+	deadline, ok := ctx.Deadline()
+	if ok {
+		timeout = time.Until(deadline)
+	}
+
+	_, err := shared.RunCommandContext(ctx, cmd, "-n", "-q", ip.String(), "-c", "1", "-w", fmt.Sprintf("%d", int(timeout.Seconds())))
+
+	return err
 }
 
 func pingSubnet(subnet *net.IPNet) bool {
@@ -701,7 +709,7 @@ func pingSubnet(subnet *net.IPNet) bool {
 	ping := func(ip net.IP) {
 		defer wgChecks.Done()
 
-		if !pingIP(ip) {
+		if pingIP(context.TODO(), ip) != nil {
 			return
 		}
 
@@ -884,7 +892,7 @@ func usesIPv4Firewall(netConfig map[string]string) bool {
 		return false
 	}
 
-	if netConfig["ipv4.firewall"] == "" || shared.IsTrue(netConfig["ipv4.firewall"]) {
+	if shared.IsTrueOrEmpty(netConfig["ipv4.firewall"]) {
 		return true
 	}
 
@@ -901,7 +909,7 @@ func usesIPv6Firewall(netConfig map[string]string) bool {
 		return false
 	}
 
-	if netConfig["ipv6.firewall"] == "" || shared.IsTrue(netConfig["ipv6.firewall"]) {
+	if shared.IsTrueOrEmpty(netConfig["ipv6.firewall"]) {
 		return true
 	}
 
@@ -1094,6 +1102,16 @@ func InterfaceExists(nic string) bool {
 		return true
 	}
 
+	return false
+}
+
+// IPInSlice returns true if slice has IP element.
+func IPInSlice(key net.IP, list []net.IP) bool {
+	for _, entry := range list {
+		if entry.Equal(key) {
+			return true
+		}
+	}
 	return false
 }
 

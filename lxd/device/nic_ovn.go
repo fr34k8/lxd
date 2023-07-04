@@ -6,7 +6,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -37,7 +36,7 @@ type ovnNet interface {
 
 	InstanceDevicePortValidateExternalRoutes(deviceInstance instance.Instance, deviceName string, externalRoutes []*net.IPNet) error
 	InstanceDevicePortAdd(instanceUUID string, deviceName string, deviceConfig deviceConfig.Device) error
-	InstanceDevicePortStart(opts *network.OVNInstanceNICSetupOpts, securityACLsRemove []string) (openvswitch.OVNSwitchPort, error)
+	InstanceDevicePortStart(opts *network.OVNInstanceNICSetupOpts, securityACLsRemove []string) (openvswitch.OVNSwitchPort, []net.IP, error)
 	InstanceDevicePortStop(ovsExternalOVNPort openvswitch.OVNSwitchPort, opts *network.OVNInstanceNICStopOpts) error
 	InstanceDevicePortRemove(instanceUUID string, deviceName string, deviceConfig deviceConfig.Device) error
 	InstanceDevicePortDynamicIPs(instanceUUID string, deviceName string) ([]net.IP, error)
@@ -47,6 +46,11 @@ type nicOVN struct {
 	deviceCommon
 
 	network ovnNet // Populated in validateConfig().
+}
+
+// CanHotPlug returns whether the device can be managed whilst the instance is running.
+func (d *nicOVN) CanHotPlug() bool {
+	return true
 }
 
 // CanMigrate returns whether the device can be migrated to any other cluster member.
@@ -538,17 +542,44 @@ func (d *nicOVN) Start() (*deviceConfig.RunConfig, error) {
 	// Populate device config with volatile fields if needed.
 	networkVethFillFromVolatile(d.config, saveData)
 
+	v := d.volatileGet()
+
+	// Retrieve any last state IPs from volatile and pass them to OVN driver for potential use with sticky
+	// DHCPv4 allocations.
+	var lastStateIPs []net.IP
+	for _, ipStr := range shared.SplitNTrimSpace(v["last_state.ip_addresses"], ",", -1, true) {
+		lastStateIP := net.ParseIP(ipStr)
+		if lastStateIP != nil {
+			lastStateIPs = append(lastStateIPs, lastStateIP)
+		}
+	}
+
 	// Add new OVN logical switch port for instance.
-	logicalPortName, err := d.network.InstanceDevicePortStart(&network.OVNInstanceNICSetupOpts{
+	logicalPortName, dnsIPs, err := d.network.InstanceDevicePortStart(&network.OVNInstanceNICSetupOpts{
 		InstanceUUID: d.inst.LocalConfig()["volatile.uuid"],
 		DNSName:      d.inst.Name(),
 		DeviceName:   d.name,
 		DeviceConfig: d.config,
 		UplinkConfig: uplink.Config,
+		LastStateIPs: lastStateIPs, // Pass in volatile last state IPs for use with sticky DHCPv4 hint.
 	}, nil)
 	if err != nil {
 		return nil, fmt.Errorf("Failed setting up OVN port: %w", err)
 	}
+
+	// Record switch port DNS IPs to volatile so they can be used as sticky DHCPv4 hint in the future in order
+	// to allocate the same IPs on next start if they are still available/appropriate.
+	// This volatile key will not be removed when instance stops.
+	var dnsIPsStr strings.Builder
+	for i, dnsIP := range dnsIPs {
+		if i > 0 {
+			dnsIPsStr.WriteString(",")
+		}
+
+		dnsIPsStr.WriteString(dnsIP.String())
+	}
+
+	saveData["last_state.ip_addresses"] = dnsIPsStr.String()
 
 	revert.Add(func() {
 		_ = d.network.InstanceDevicePortStop("", &network.OVNInstanceNICStopOpts{
@@ -707,7 +738,7 @@ func (d *nicOVN) Update(oldDevices deviceConfig.Devices, isRunning bool) error {
 			}
 
 			// Update OVN logical switch port for instance.
-			_, err = d.network.InstanceDevicePortStart(&network.OVNInstanceNICSetupOpts{
+			_, _, err = d.network.InstanceDevicePortStart(&network.OVNInstanceNICSetupOpts{
 				InstanceUUID: d.inst.LocalConfig()["volatile.uuid"],
 				DNSName:      d.inst.Name(),
 				DeviceName:   d.name,
@@ -747,12 +778,12 @@ func (d *nicOVN) Update(oldDevices deviceConfig.Devices, isRunning bool) error {
 }
 
 func (d *nicOVN) findRepresentorPort(volatile map[string]string) (string, error) {
-	sysClassNet := "/sys/class/net"
-	physSwitchID, err := os.ReadFile(filepath.Join(sysClassNet, volatile["last_state.vf.parent"], "phys_switch_id"))
+	physSwitchID, pfID, err := network.SRIOVGetSwitchAndPFID(volatile["last_state.vf.parent"])
 	if err != nil {
-		return "", fmt.Errorf("Failed finding physical parent switch ID to release representor port: %w", err)
+		return "", fmt.Errorf("Failed finding physical parent switch and PF ID to release representor port: %w", err)
 	}
 
+	sysClassNet := "/sys/class/net"
 	nics, err := os.ReadDir(sysClassNet)
 	if err != nil {
 		return "", fmt.Errorf("Failed reading NICs directory %q: %w", sysClassNet, err)
@@ -764,7 +795,7 @@ func (d *nicOVN) findRepresentorPort(volatile map[string]string) (string, error)
 	}
 
 	// Track down the representor port to remove it from the integration bridge.
-	representorPort := network.SRIOVFindRepresentorPort(nics, string(physSwitchID), vfID)
+	representorPort := network.SRIOVFindRepresentorPort(nics, string(physSwitchID), pfID, vfID)
 	if representorPort == "" {
 		return "", fmt.Errorf("Failed finding representor")
 	}

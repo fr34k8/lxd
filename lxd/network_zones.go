@@ -27,7 +27,7 @@ var networkZonesCmd = APIEndpoint{
 }
 
 var networkZoneCmd = APIEndpoint{
-	Path: "network-zones/{name}",
+	Path: "network-zones/{zone}",
 
 	Delete: APIEndpointAction{Handler: networkZoneDelete, AccessHandler: allowProjectPermission("networks", "manage-networks")},
 	Get:    APIEndpointAction{Handler: networkZoneGet, AccessHandler: allowProjectPermission("networks", "view")},
@@ -130,7 +130,9 @@ var networkZoneCmd = APIEndpoint{
 //	  "500":
 //	    $ref: "#/responses/InternalServerError"
 func networkZonesGet(d *Daemon, r *http.Request) response.Response {
-	projectName, _, err := project.NetworkZoneProject(d.State().DB.Cluster, projectParam(r))
+	s := d.State()
+
+	projectName, _, err := project.NetworkZoneProject(s.DB.Cluster, projectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -138,7 +140,7 @@ func networkZonesGet(d *Daemon, r *http.Request) response.Response {
 	recursion := util.IsRecursionRequest(r)
 
 	// Get list of Network zones.
-	zoneNames, err := d.db.Cluster.GetNetworkZonesByProject(projectName)
+	zoneNames, err := s.DB.Cluster.GetNetworkZonesByProject(projectName)
 	if err != nil {
 		return response.InternalError(err)
 	}
@@ -149,7 +151,7 @@ func networkZonesGet(d *Daemon, r *http.Request) response.Response {
 		if !recursion {
 			resultString = append(resultString, api.NewURL().Path(version.APIVersion, "network-zones", zoneName).String())
 		} else {
-			netzone, err := zone.LoadByNameAndProject(d.State(), projectName, zoneName)
+			netzone, err := zone.LoadByNameAndProject(s, projectName, zoneName)
 			if err != nil {
 				continue
 			}
@@ -201,7 +203,9 @@ func networkZonesGet(d *Daemon, r *http.Request) response.Response {
 //	  "500":
 //	    $ref: "#/responses/InternalServerError"
 func networkZonesPost(d *Daemon, r *http.Request) response.Response {
-	projectName, _, err := project.NetworkZoneProject(d.State().DB.Cluster, projectParam(r))
+	s := d.State()
+
+	projectName, _, err := project.NetworkZoneProject(s.DB.Cluster, projectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -215,28 +219,28 @@ func networkZonesPost(d *Daemon, r *http.Request) response.Response {
 	}
 
 	// Create the zone.
-	err = zone.Exists(d.State(), req.Name)
+	err = zone.Exists(s, req.Name)
 	if err == nil {
 		return response.BadRequest(fmt.Errorf("The network zone already exists"))
 	}
 
-	err = zone.Create(d.State(), projectName, &req)
+	err = zone.Create(s, projectName, &req)
 	if err != nil {
 		return response.SmartError(err)
 	}
 
-	netzone, err := zone.LoadByNameAndProject(d.State(), projectName, req.Name)
+	netzone, err := zone.LoadByNameAndProject(s, projectName, req.Name)
 	if err != nil {
 		return response.BadRequest(err)
 	}
 
 	lc := lifecycle.NetworkZoneCreated.Event(netzone, request.CreateRequestor(r), nil)
-	d.State().Events.SendLifecycle(projectName, lc)
+	s.Events.SendLifecycle(projectName, lc)
 
 	return response.SyncResponseLocation(true, nil, lc.Source)
 }
 
-// swagger:operation DELETE /1.0/network-zones/{name} network-zones network_zone_delete
+// swagger:operation DELETE /1.0/network-zones/{zone} network-zones network_zone_delete
 //
 //	Delete the network zone
 //
@@ -261,17 +265,19 @@ func networkZonesPost(d *Daemon, r *http.Request) response.Response {
 //	  "500":
 //	    $ref: "#/responses/InternalServerError"
 func networkZoneDelete(d *Daemon, r *http.Request) response.Response {
-	projectName, _, err := project.NetworkZoneProject(d.State().DB.Cluster, projectParam(r))
+	s := d.State()
+
+	projectName, _, err := project.NetworkZoneProject(s.DB.Cluster, projectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
 
-	zoneName, err := url.PathUnescape(mux.Vars(r)["name"])
+	zoneName, err := url.PathUnescape(mux.Vars(r)["zone"])
 	if err != nil {
 		return response.SmartError(err)
 	}
 
-	netzone, err := zone.LoadByNameAndProject(d.State(), projectName, zoneName)
+	netzone, err := zone.LoadByNameAndProject(s, projectName, zoneName)
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -281,12 +287,12 @@ func networkZoneDelete(d *Daemon, r *http.Request) response.Response {
 		return response.SmartError(err)
 	}
 
-	d.State().Events.SendLifecycle(projectName, lifecycle.NetworkZoneDeleted.Event(netzone, request.CreateRequestor(r), nil))
+	s.Events.SendLifecycle(projectName, lifecycle.NetworkZoneDeleted.Event(netzone, request.CreateRequestor(r), nil))
 
 	return response.EmptySyncResponse
 }
 
-// swagger:operation GET /1.0/network-zones/{name} network-zones network_zone_get
+// swagger:operation GET /1.0/network-zones/{zone} network-zones network_zone_get
 //
 //	Get the network zone
 //
@@ -327,17 +333,19 @@ func networkZoneDelete(d *Daemon, r *http.Request) response.Response {
 //	  "500":
 //	    $ref: "#/responses/InternalServerError"
 func networkZoneGet(d *Daemon, r *http.Request) response.Response {
-	projectName, _, err := project.NetworkZoneProject(d.State().DB.Cluster, projectParam(r))
+	s := d.State()
+
+	projectName, _, err := project.NetworkZoneProject(s.DB.Cluster, projectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
 
-	zoneName, err := url.PathUnescape(mux.Vars(r)["name"])
+	zoneName, err := url.PathUnescape(mux.Vars(r)["zone"])
 	if err != nil {
 		return response.SmartError(err)
 	}
 
-	netzone, err := zone.LoadByNameAndProject(d.State(), projectName, zoneName)
+	netzone, err := zone.LoadByNameAndProject(s, projectName, zoneName)
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -351,7 +359,7 @@ func networkZoneGet(d *Daemon, r *http.Request) response.Response {
 	return response.SyncResponseETag(true, info, netzone.Etag())
 }
 
-// swagger:operation PATCH /1.0/network-zones/{name} network-zones network_zone_patch
+// swagger:operation PATCH /1.0/network-zones/{zone} network-zones network_zone_patch
 //
 //  Partially update the network zone
 //
@@ -386,7 +394,7 @@ func networkZoneGet(d *Daemon, r *http.Request) response.Response {
 //    "500":
 //      $ref: "#/responses/InternalServerError"
 
-// swagger:operation PUT /1.0/network-zones/{name} network-zones network_zone_put
+// swagger:operation PUT /1.0/network-zones/{zone} network-zones network_zone_put
 //
 //	Update the network zone
 //
@@ -421,18 +429,20 @@ func networkZoneGet(d *Daemon, r *http.Request) response.Response {
 //	  "500":
 //	    $ref: "#/responses/InternalServerError"
 func networkZonePut(d *Daemon, r *http.Request) response.Response {
-	projectName, _, err := project.NetworkZoneProject(d.State().DB.Cluster, projectParam(r))
+	s := d.State()
+
+	projectName, _, err := project.NetworkZoneProject(s.DB.Cluster, projectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
 
-	zoneName, err := url.PathUnescape(mux.Vars(r)["name"])
+	zoneName, err := url.PathUnescape(mux.Vars(r)["zone"])
 	if err != nil {
 		return response.SmartError(err)
 	}
 
 	// Get the existing Network zone.
-	netzone, err := zone.LoadByNameAndProject(d.State(), projectName, zoneName)
+	netzone, err := zone.LoadByNameAndProject(s, projectName, zoneName)
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -469,7 +479,7 @@ func networkZonePut(d *Daemon, r *http.Request) response.Response {
 		return response.SmartError(err)
 	}
 
-	d.State().Events.SendLifecycle(projectName, lifecycle.NetworkZoneUpdated.Event(netzone, request.CreateRequestor(r), nil))
+	s.Events.SendLifecycle(projectName, lifecycle.NetworkZoneUpdated.Event(netzone, request.CreateRequestor(r), nil))
 
 	return response.EmptySyncResponse
 }

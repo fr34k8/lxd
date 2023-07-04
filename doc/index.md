@@ -1,10 +1,12 @@
 ---
-relatedlinks: https://linuxcontainers.org/, https://ubuntu.com/lxd, https://ubuntu.com/blog/open-source-for-beginners-dev-environment-with-lxd
+relatedlinks: https://ubuntu.com/lxd, https://ubuntu.com/blog/open-source-for-beginners-dev-environment-with-lxd
 ---
 
-[![LXD](../.sphinx/_static/download/containers.png)](https://linuxcontainers.org/lxd)
-
 # LXD
+
+LXD (<a href="#" title="Listen" onclick="document.getElementById('player').play();return false;">`[lɛks'di:]`&#128264;</a>) is a modern, secure and powerful system container and virtual machine manager.
+
+<audio id="player">  <source src="_static/lxd.mp3" type="audio/mpeg">  <source src="_static/lxd.ogg" type="audio/ogg">  <source src="_static/lxd.wav" type="audio/wav"></audio>
 
 % Include content from [../README.md](../README.md)
 ```{include} ../README.md
@@ -37,13 +39,14 @@ It’s an open source project that warmly welcomes community projects, contribut
 
 The LXD project is sponsored by [Canonical Ltd](https://www.canonical.com).
 
-- [Code of Conduct](https://github.com/lxc/lxd/blob/master/CODE_OF_CONDUCT.md) <!-- wokeignore:rule=master -->
+- [Code of Conduct](https://github.com/canonical/lxd/blob/main/CODE_OF_CONDUCT.md)
 - [Contribute to the project](contributing.md)
+- [Release announcements](https://discourse.ubuntu.com/c/lxd/news/)
+- [Release tarballs](https://github.com/canonical/lxd/releases/)
 - [Get support](support.md)
 - [Watch tutorials and announcements on YouTube](https://www.youtube.com/c/LXDvideos)
-- [Discuss on IRC](https://web.libera.chat/#lxc) (see [Getting started with IRC](https://discuss.linuxcontainers.org/t/getting-started-with-irc/11920) if needed)
-- [Ask and answer questions on the forum](https://discuss.linuxcontainers.org)
-- [Join the mailing lists](https://lists.linuxcontainers.org)
+- [Discuss on IRC](https://web.libera.chat/#lxd) (see [Getting started with IRC](https://discuss.linuxcontainers.org/t/getting-started-with-irc/11920) if needed)
+- [Ask and answer questions on the forum](https://discourse.ubuntu.com/c/lxd/)
 
 ```{toctree}
 :hidden:
@@ -51,6 +54,7 @@ The LXD project is sponsored by [Canonical Ltd](https://www.canonical.com).
 
 self
 getting_started
+Server and client <operation>
 security
 instances
 images
@@ -59,7 +63,7 @@ networks
 projects
 clustering
 production-setup
-operation
+migration
 restapi_landing
 internals
 external_resources

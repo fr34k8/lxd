@@ -73,7 +73,7 @@ type Pool interface {
 	UpdateInstanceBackupFile(inst instance.Instance, op *operations.Operation) error
 	GenerateInstanceBackupConfig(inst instance.Instance, snapshots bool, op *operations.Operation) (*backupConfig.Config, error)
 	CheckInstanceBackupFileSnapshots(backupConf *backupConfig.Config, projectName string, deleteMissing bool, op *operations.Operation) ([]*api.InstanceSnapshot, error)
-	ImportInstance(inst instance.Instance, poolVol *backupConfig.Config, op *operations.Operation) error
+	ImportInstance(inst instance.Instance, poolVol *backupConfig.Config, op *operations.Operation) (revert.Hook, error)
 	CleanupInstancePaths(inst instance.Instance, op *operations.Operation) error
 
 	MigrateInstance(inst instance.Instance, conn io.ReadWriteCloser, args *migration.VolumeSourceArgs, op *operations.Operation) error
@@ -107,7 +107,7 @@ type Pool interface {
 	CreateBucketKey(projectName string, bucketName string, key api.StorageBucketKeysPost, op *operations.Operation) (*api.StorageBucketKey, error)
 	UpdateBucketKey(projectName string, bucketName string, keyName string, key api.StorageBucketKeyPut, op *operations.Operation) error
 	DeleteBucketKey(projectName string, bucketName string, keyName string, op *operations.Operation) error
-	ActivateBucket(bucketName string, op *operations.Operation) (*miniod.Process, error)
+	ActivateBucket(projectName string, bucketName string, op *operations.Operation) (*miniod.Process, error)
 	GetBucketURL(bucketName string) *url.URL
 
 	// Custom volumes.
@@ -120,9 +120,10 @@ type Pool interface {
 	GetCustomVolumeUsage(projectName string, volName string) (*VolumeUsage, error)
 	MountCustomVolume(projectName string, volName string, op *operations.Operation) error
 	UnmountCustomVolume(projectName string, volName string, op *operations.Operation) (bool, error)
-	ImportCustomVolume(projectName string, poolVol *backupConfig.Config, op *operations.Operation) error
+	ImportCustomVolume(projectName string, poolVol *backupConfig.Config, op *operations.Operation) (revert.Hook, error)
 	RefreshCustomVolume(projectName string, srcProjectName string, volName, desc string, config map[string]string, srcPoolName, srcVolName string, snapshots bool, op *operations.Operation) error
 	GenerateCustomVolumeBackupConfig(projectName string, volName string, snapshots bool, op *operations.Operation) (*backupConfig.Config, error)
+	CreateCustomVolumeFromISO(projectName string, volName string, srcData io.ReadSeeker, size int64, op *operations.Operation) error
 
 	// Custom volume snapshots.
 	CreateCustomVolumeSnapshot(projectName string, volName string, newSnapshotName string, newExpiryDate time.Time, op *operations.Operation) error
